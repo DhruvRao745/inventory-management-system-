@@ -1,0 +1,2 @@
+# Feature modules live here — one folder per feature (auth/, products/, stock/...),
+# each containing its own routes, controller, and service files.

@@ -1,0 +1,14 @@
+// Prisma schema — the single source of truth for our database structure.
+// We define tables ("models") here; `prisma migrate dev` turns them into SQL.
+//
+// NEXT STEP: we will design the full multi-tenant schema here
+// (Company, User, Location, Product, StockMovement...).
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}

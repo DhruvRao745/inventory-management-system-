@@ -1,0 +1,3 @@
+/* Tailwind v4: this single import pulls in the whole framework.
+   Utility classes (flex, p-4, text-lg...) become available in all components. */
+@import "tailwindcss";
