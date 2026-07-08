@@ -1,0 +1,70 @@
+/**
+ * Stock routes — the diary counter.
+ *
+ *   POST /api/stock/movements  → write a diary line (any logged-in user)
+ *   POST /api/stock/transfer   → move goods between locations
+ *   GET  /api/stock/movements  → read the diary (history)
+ *   GET  /api/stock/levels     → current totals + low-stock flags
+ *
+ * No PATCH. No DELETE. The diary is written in pen.
+ */
+import { Router } from "express";
+import {
+  createMovementSchema,
+  transferSchema,
+  listMovementsQuerySchema,
+  levelsQuerySchema,
+} from "./stock.schemas.js";
+import * as stockService from "./stock.service.js";
+import { asyncHandler } from "../../middleware/error.js";
+import { requireAuth, type AuthRequest } from "../../middleware/auth.js";
+
+export const stockRouter = Router();
+stockRouter.use(requireAuth);
+
+stockRouter.post(
+  "/movements",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const input = createMovementSchema.parse(req.body);
+    const movement = await stockService.createMovement(
+      req.user!.companyId,
+      req.user!.userId,
+      input
+    );
+    res.status(201).json(movement);
+  })
+);
+
+stockRouter.post(
+  "/transfer",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const input = transferSchema.parse(req.body);
+    const result = await stockService.transfer(
+      req.user!.companyId,
+      req.user!.userId,
+      input
+    );
+    res.status(201).json(result);
+  })
+);
+
+stockRouter.get(
+  "/movements",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const query = listMovementsQuerySchema.parse(req.query);
+    const result = await stockService.listMovements(
+      req.user!.companyId,
+      query
+    );
+    res.json(result);
+  })
+);
+
+stockRouter.get(
+  "/levels",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const query = levelsQuerySchema.parse(req.query);
+    const result = await stockService.stockLevels(req.user!.companyId, query);
+    res.json(result);
+  })
+);
