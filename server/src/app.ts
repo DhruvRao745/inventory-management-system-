@@ -10,6 +10,7 @@ import express from "express";
 import cors from "cors";
 import helmet from "helmet";
 import { authRouter } from "./modules/auth/auth.routes.js";
+import { productsRouter } from "./modules/products/product.routes.js";
 import { errorHandler } from "./middleware/error.js";
 
 export const app = express();
@@ -28,7 +29,7 @@ app.get("/api/health", (_req, res) => {
 
 // Feature modules — each mounted under its own /api prefix
 app.use("/api/auth", authRouter);
-// app.use("/api/products", productsRouter);   ← coming next
+app.use("/api/products", productsRouter);
 
 // --- 404 handler: anything that matched no route above ---
 app.use((_req, res) => {

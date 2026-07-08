@@ -48,3 +48,23 @@ export function requireAuth(
 
   next(); // all good — let the request through the door
 }
+
+/**
+ * A second, stricter guard for doors that need a certain rank.
+ * Usage:  router.post("/", requireAuth, requireRole("ADMIN", "MANAGER"), ...)
+ *
+ * Note the difference in answers:
+ *   401 = "I don't know who you are" (no/bad badge)
+ *   403 = "I know exactly who you are — and you may not do this"
+ */
+export function requireRole(...allowed: AuthPayload["role"][]) {
+  return (req: AuthRequest, _res: Response, next: NextFunction) => {
+    if (!req.user) {
+      throw new AppError(401, "Not logged in — token missing");
+    }
+    if (!allowed.includes(req.user.role)) {
+      throw new AppError(403, "Your role doesn't allow this action");
+    }
+    next();
+  };
+}
