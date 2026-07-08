@@ -1,8 +1,11 @@
-// Prisma schema — the single source of truth for our database structure.
-// We define tables ("models") here; `prisma migrate dev` turns them into SQL.
+// ============================================================
+// Inventory — multi-tenant database schema
 //
-// NEXT STEP: we will design the full multi-tenant schema here
-// (Company, User, Location, Product, StockMovement...).
+// THE ONE RULE: every model except Company carries `companyId`.
+// A company (our paying customer) can only ever see rows with
+// its own companyId. This is what makes one codebase safely
+// serve many businesses.
+// ============================================================
 
 generator client {
   provider = "prisma-client-js"
@@ -11,4 +14,159 @@ generator client {
 datasource db {
   provider = "postgresql"
   url      = env("DATABASE_URL")
+}
+
+// ------------------------------------------------------------
+// TENANT
+// ------------------------------------------------------------
+
+/// One customer business. Everything else hangs off this.
+model Company {
+  id        String   @id @default(cuid())
+  name      String
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  users          User[]
+  locations      Location[]
+  categories     Category[]
+  products       Product[]
+  stockMovements StockMovement[]
+}
+
+// ------------------------------------------------------------
+// PEOPLE & ACCESS
+// ------------------------------------------------------------
+
+enum Role {
+  ADMIN   // full control incl. settings & users
+  MANAGER // manage products, approve adjustments
+  STAFF   // record stock in/out
+}
+
+model User {
+  id           String   @id @default(cuid())
+  companyId    String
+  email        String
+  passwordHash String   // NEVER the password itself — bcrypt hash only
+  name         String
+  role         Role     @default(STAFF)
+  isActive     Boolean  @default(true)
+  createdAt    DateTime @default(now())
+  updatedAt    DateTime @updatedAt
+
+  company        Company         @relation(fields: [companyId], references: [id])
+  stockMovements StockMovement[] // movements this user recorded
+
+  // Same email may exist at two different companies,
+  // but only once within one company:
+  @@unique([companyId, email])
+  @@index([companyId])
+}
+
+// ------------------------------------------------------------
+// PLACES
+// ------------------------------------------------------------
+
+/// Warehouse, shop, or branch. Single-location companies
+/// simply have one row here (created automatically at signup).
+model Location {
+  id        String   @id @default(cuid())
+  companyId String
+  name      String
+  address   String?
+  isDefault Boolean  @default(false)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company        Company         @relation(fields: [companyId], references: [id])
+  stockMovements StockMovement[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+}
+
+// ------------------------------------------------------------
+// WHAT WE STOCK
+// ------------------------------------------------------------
+
+model Category {
+  id        String   @id @default(cuid())
+  companyId String
+  name      String
+  createdAt DateTime @default(now())
+
+  company  Company   @relation(fields: [companyId], references: [id])
+  products Product[]
+
+  @@unique([companyId, name])
+  @@index([companyId])
+}
+
+model Product {
+  id                String   @id @default(cuid())
+  companyId         String
+  sku               String   // "stock keeping unit" — the code printed on the label
+  name              String
+  description       String?
+  categoryId        String?
+  unit              String   @default("pcs") // pcs, kg, litre... configurable per product
+  costPrice         Decimal  @default(0) @db.Decimal(12, 2) // what WE pay — Decimal, never Float, for money!
+  sellingPrice      Decimal  @default(0) @db.Decimal(12, 2) // what the customer pays
+  lowStockThreshold Int      @default(0) // alert when stock falls below this
+  isActive          Boolean  @default(true)
+  createdAt         DateTime @default(now())
+  updatedAt         DateTime @updatedAt
+
+  company        Company         @relation(fields: [companyId], references: [id])
+  category       Category?       @relation(fields: [categoryId], references: [id])
+  stockMovements StockMovement[]
+
+  // SKU must be unique within a company (two companies can both have "SKU-001")
+  @@unique([companyId, sku])
+  @@index([companyId])
+}
+
+// ------------------------------------------------------------
+// THE HEART: STOCK AS AN EVENT LOG
+// ------------------------------------------------------------
+
+enum MovementType {
+  PURCHASE     // stock in from a supplier          (+)
+  SALE         // stock out to a customer           (-)
+  RETURN_IN    // customer returned goods           (+)
+  RETURN_OUT   // we returned goods to supplier     (-)
+  ADJUSTMENT   // count correction, damage, theft   (+/-)
+  TRANSFER_IN  // arrived from another location     (+)
+  TRANSFER_OUT // sent to another location          (-)
+}
+
+/// We NEVER store "current stock = 50" anywhere.
+/// Every change is an immutable row here; current stock for a
+/// product at a location = SUM(quantity) over its movements.
+/// Rows are never updated or deleted — mistakes are corrected
+/// by adding a compensating ADJUSTMENT. That's the audit trail.
+model StockMovement {
+  id          String       @id @default(cuid())
+  companyId   String
+  productId   String
+  locationId  String
+  type        MovementType
+  quantity    Int          // SIGNED delta: +100 purchase, -3 sale
+  unitCost    Decimal?     @db.Decimal(12, 2) // cost at the moment of movement (for valuation)
+  reference   String?      // invoice no, PO no, reason for adjustment...
+  note        String?
+  transferId  String?      // links the OUT and IN rows of one transfer
+  createdById String
+  createdAt   DateTime     @default(now())
+  // deliberately NO updatedAt — movements are immutable
+
+  company   Company  @relation(fields: [companyId], references: [id])
+  product   Product  @relation(fields: [productId], references: [id])
+  location  Location @relation(fields: [locationId], references: [id])
+  createdBy User     @relation(fields: [createdById], references: [id])
+
+  // The queries we'll run constantly — make them fast:
+  @@index([companyId, productId, locationId])
+  @@index([companyId, createdAt])
 }

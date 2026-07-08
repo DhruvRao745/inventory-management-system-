@@ -9,6 +9,8 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import { authRouter } from "./modules/auth/auth.routes.js";
+import { errorHandler } from "./middleware/error.js";
 
 export const app = express();
 
@@ -24,11 +26,14 @@ app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "inventory-api", time: new Date().toISOString() });
 });
 
-// Feature modules (products, stock, auth...) will be mounted here later:
-// app.use("/api/auth", authRouter);
-// app.use("/api/products", productsRouter);
+// Feature modules — each mounted under its own /api prefix
+app.use("/api/auth", authRouter);
+// app.use("/api/products", productsRouter);   ← coming next
 
 // --- 404 handler: anything that matched no route above ---
 app.use((_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
+
+// --- Error handler: MUST be last. All errors flow down here. ---
+app.use(errorHandler);
