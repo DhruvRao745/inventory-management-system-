@@ -58,17 +58,20 @@ export async function createProduct(
     throw new AppError(409, `A product with SKU "${input.sku}" already exists`);
   }
 
+  // "" from a form's empty dropdown means "no category" → store null
+  const categoryId = input.categoryId || null;
+
   // If a category was given, it must be OUR category — never trust ids
   // from the request without checking whose they are.
-  if (input.categoryId) {
+  if (categoryId) {
     const category = await prisma.category.findFirst({
-      where: { id: input.categoryId, companyId },
+      where: { id: categoryId, companyId },
     });
     if (!category) throw new AppError(400, "Unknown category");
   }
 
   return prisma.product.create({
-    data: { ...input, companyId },
+    data: { ...input, categoryId, companyId },
     include: { category: { select: { id: true, name: true } } },
   });
 }
@@ -89,16 +92,20 @@ export async function updateProduct(
     }
   }
 
-  if (input.categoryId) {
+  // undefined = "don't touch category"; "" = "clear it" (store null)
+  const categoryId =
+    input.categoryId === undefined ? undefined : input.categoryId || null;
+
+  if (categoryId) {
     const category = await prisma.category.findFirst({
-      where: { id: input.categoryId, companyId },
+      where: { id: categoryId, companyId },
     });
     if (!category) throw new AppError(400, "Unknown category");
   }
 
   return prisma.product.update({
     where: { id },
-    data: input,
+    data: { ...input, categoryId },
     include: { category: { select: { id: true, name: true } } },
   });
 }

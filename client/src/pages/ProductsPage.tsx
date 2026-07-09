@@ -21,12 +21,15 @@ const emptyForm = {
   sku: "",
   name: "",
   description: "",
+  categoryId: "", // "" = no category
   unit: "pcs",
   costPrice: "0",
   sellingPrice: "0",
   lowStockThreshold: "0",
 };
 type ProductForm = typeof emptyForm;
+
+type CategoryWithCount = { id: string; name: string; productCount: number };
 
 export function ProductsPage() {
   const { user } = useAuth();
@@ -37,6 +40,13 @@ export function ProductsPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+  const [categories, setCategories] = useState<CategoryWithCount[]>([]);
+  const [categoryFilter, setCategoryFilter] = useState("");
+
+  // manage-categories modal
+  const [catModalOpen, setCatModalOpen] = useState(false);
+  const [newCatName, setNewCatName] = useState("");
+  const [catError, setCatError] = useState<string | null>(null);
 
   // modal state: closed | adding | editing a specific product
   const [modal, setModal] = useState<"closed" | "add" | "edit">("closed");
@@ -46,13 +56,15 @@ export function ProductsPage() {
   const [busy, setBusy] = useState(false);
 
   // --- data loading ---
-  async function load(searchTerm = "") {
+  async function load(searchTerm = "", catId = "") {
     setLoading(true);
     setError(null);
     try {
-      const query = searchTerm
-        ? `?search=${encodeURIComponent(searchTerm)}`
-        : "";
+      // URLSearchParams builds "?search=pen&categoryId=..." safely
+      const params = new URLSearchParams();
+      if (searchTerm) params.set("search", searchTerm);
+      if (catId) params.set("categoryId", catId);
+      const query = params.toString() ? `?${params.toString()}` : "";
       setProducts(await api<Product[]>(`/products${query}`));
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load");
@@ -61,13 +73,18 @@ export function ProductsPage() {
     }
   }
 
+  async function loadCategories() {
+    setCategories(await api<CategoryWithCount[]>("/categories"));
+  }
+
   useEffect(() => {
     load();
+    loadCategories();
   }, []);
 
   function handleSearch(e: FormEvent) {
     e.preventDefault();
-    load(search);
+    load(search, categoryFilter);
   }
 
   // --- modal helpers ---
@@ -83,6 +100,7 @@ export function ProductsPage() {
       sku: p.sku,
       name: p.name,
       description: p.description ?? "",
+      categoryId: p.categoryId ?? "",
       unit: p.unit,
       costPrice: p.costPrice,
       sellingPrice: p.sellingPrice,
@@ -108,6 +126,7 @@ export function ProductsPage() {
       sku: form.sku,
       name: form.name,
       description: form.description || undefined,
+      categoryId: form.categoryId, // "" means "no category" — server stores null
       unit: form.unit,
       costPrice: Number(form.costPrice),
       sellingPrice: Number(form.sellingPrice),
@@ -121,7 +140,8 @@ export function ProductsPage() {
         await api(`/products/${editingId}`, { method: "PATCH", body });
       }
       setModal("closed");
-      await load(search);
+      await load(search, categoryFilter);
+      await loadCategories(); // product counts may have changed
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : "Save failed");
     } finally {
@@ -134,9 +154,37 @@ export function ProductsPage() {
       return;
     try {
       await api(`/products/${p.id}`, { method: "DELETE" });
-      await load(search);
+      await load(search, categoryFilter);
     } catch (err) {
       alert(err instanceof ApiError ? err.message : "Failed to retire");
+    }
+  }
+
+  // --- category management ---
+  async function addCategory(e: FormEvent) {
+    e.preventDefault();
+    setCatError(null);
+    try {
+      await api("/categories", { method: "POST", body: { name: newCatName } });
+      setNewCatName("");
+      await loadCategories();
+    } catch (err) {
+      setCatError(err instanceof ApiError ? err.message : "Failed to add");
+    }
+  }
+
+  async function deleteCategory(c: CategoryWithCount) {
+    const warning =
+      c.productCount > 0
+        ? `Delete "${c.name}"? Its ${c.productCount} product(s) will become uncategorized.`
+        : `Delete "${c.name}"?`;
+    if (!window.confirm(warning)) return;
+    try {
+      await api(`/categories/${c.id}`, { method: "DELETE" });
+      await loadCategories();
+      await load(search, categoryFilter);
+    } catch (err) {
+      alert(err instanceof ApiError ? err.message : "Failed to delete");
     }
   }
 
@@ -158,17 +206,44 @@ export function ProductsPage() {
         )}
       </div>
 
-      {/* Search */}
-      <form onSubmit={handleSearch} className="mt-4 flex gap-2">
+      {/* Search + category filter */}
+      <form onSubmit={handleSearch} className="mt-4 flex gap-2 items-center">
         <input
           value={search}
           onChange={(e) => setSearch(e.target.value)}
           placeholder="Search by name or SKU…"
           className="rounded-lg border border-slate-300 px-3 py-2 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-slate-400"
         />
+        <select
+          value={categoryFilter}
+          onChange={(e) => {
+            setCategoryFilter(e.target.value);
+            load(search, e.target.value); // filter applies immediately
+          }}
+          className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
+        >
+          <option value="">All categories</option>
+          {categories.map((c) => (
+            <option key={c.id} value={c.id}>
+              {c.name} ({c.productCount})
+            </option>
+          ))}
+        </select>
         <button className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-100">
           Search
         </button>
+        {canWrite && (
+          <button
+            type="button"
+            onClick={() => {
+              setCatError(null);
+              setCatModalOpen(true);
+            }}
+            className="text-sm text-slate-500 underline hover:text-slate-800 ml-2"
+          >
+            Manage categories
+          </button>
+        )}
       </form>
 
       {/* The three states of every data page */}
@@ -284,6 +359,23 @@ export function ProductsPage() {
                 className={inputClass}
               />
             </div>
+            <div>
+              <label className="block text-sm text-slate-600 mb-1">
+                Category (optional)
+              </label>
+              <select
+                value={form.categoryId}
+                onChange={(e) => setField("categoryId", e.target.value)}
+                className={inputClass}
+              >
+                <option value="">— none —</option>
+                {categories.map((c) => (
+                  <option key={c.id} value={c.id}>
+                    {c.name}
+                  </option>
+                ))}
+              </select>
+            </div>
             <div className="grid grid-cols-3 gap-3">
               <div>
                 <label className="block text-sm text-slate-600 mb-1">Cost</label>
@@ -350,6 +442,54 @@ export function ProductsPage() {
               </button>
             </div>
           </form>
+        </Modal>
+      )}
+
+      {/* Manage categories modal */}
+      {catModalOpen && (
+        <Modal title="Categories" onClose={() => setCatModalOpen(false)}>
+          <form onSubmit={addCategory} className="flex gap-2">
+            <input
+              required
+              minLength={2}
+              value={newCatName}
+              onChange={(e) => setNewCatName(e.target.value)}
+              placeholder="New category name…"
+              className={inputClass}
+            />
+            <button className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700 whitespace-nowrap">
+              Add
+            </button>
+          </form>
+          {catError && (
+            <p className="mt-2 text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
+              {catError}
+            </p>
+          )}
+          <div className="mt-4 divide-y divide-slate-100">
+            {categories.length === 0 && (
+              <p className="text-sm text-slate-400">No categories yet.</p>
+            )}
+            {categories.map((c) => (
+              <div
+                key={c.id}
+                className="py-2 flex items-center justify-between"
+              >
+                <span className="text-sm text-slate-800">
+                  {c.name}
+                  <span className="ml-2 text-xs text-slate-400">
+                    {c.productCount} product{c.productCount === 1 ? "" : "s"}
+                  </span>
+                </span>
+                <button
+                  onClick={() => deleteCategory(c)}
+                  className="text-xs text-slate-400 hover:text-red-600"
+                >
+                  Delete
+                </button>
+              </div>
+            ))}
+          </div>
         </Modal>
       )}
     </div>
