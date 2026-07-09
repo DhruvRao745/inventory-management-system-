@@ -54,3 +54,33 @@ locationsRouter.post(
     res.status(201).json(location);
   })
 );
+
+// PATCH /api/locations/:id — rename / change address (ADMIN/MANAGER)
+locationsRouter.patch(
+  "/:id",
+  requireRole("ADMIN", "MANAGER"),
+  asyncHandler(async (req: AuthRequest, res) => {
+    const input = createLocationSchema.partial().parse(req.body);
+    const companyId = req.user!.companyId;
+
+    const target = await prisma.location.findFirst({
+      where: { id: req.params.id, companyId },
+    });
+    if (!target) throw new AppError(404, "Location not found");
+
+    if (input.name) {
+      const duplicate = await prisma.location.findFirst({
+        where: { companyId, name: input.name, NOT: { id: target.id } },
+      });
+      if (duplicate) {
+        throw new AppError(409, `Location "${input.name}" already exists`);
+      }
+    }
+
+    const location = await prisma.location.update({
+      where: { id: target.id },
+      data: input,
+    });
+    res.json(location);
+  })
+);
