@@ -5,6 +5,8 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError } from "../lib/api";
 import { downloadCsv } from "../lib/csv";
+import { formatMoney } from "../lib/format";
+import { useAuth } from "../context/AuthContext";
 
 type ValuationRow = {
   productId: string;
@@ -32,6 +34,9 @@ function today() {
 }
 
 export function ReportsPage() {
+  const { company } = useAuth();
+  const currency = company?.currency;
+
   // --- valuation ---
   const [valuation, setValuation] = useState<Valuation | null>(null);
   const [valError, setValError] = useState<string | null>(null);
@@ -164,10 +169,10 @@ export function ReportsPage() {
                       {r.quantity} {r.unit}
                     </td>
                     <td className="px-4 py-3 text-right text-slate-600">
-                      ₹{r.costValue.toLocaleString("en-IN")}
+                      {formatMoney(r.costValue, currency)}
                     </td>
                     <td className="px-4 py-3 text-right text-slate-800">
-                      ₹{r.retailValue.toLocaleString("en-IN")}
+                      {formatMoney(r.retailValue, currency)}
                     </td>
                   </tr>
                 ))}
@@ -180,10 +185,10 @@ export function ReportsPage() {
                     {valuation.totals.quantity}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    ₹{valuation.totals.costValue.toLocaleString("en-IN")}
+                    {formatMoney(valuation.totals.costValue, currency)}
                   </td>
                   <td className="px-4 py-3 text-right">
-                    ₹{valuation.totals.retailValue.toLocaleString("en-IN")}
+                    {formatMoney(valuation.totals.retailValue, currency)}
                   </td>
                 </tr>
               </tbody>

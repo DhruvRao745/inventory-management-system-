@@ -30,7 +30,7 @@ export type User = {
   role: "ADMIN" | "MANAGER" | "STAFF";
   companyId: string;
 };
-export type Company = { id: string; name: string };
+export type Company = { id: string; name: string; currency: string };
 
 type AuthResponse = {
   token: string;
@@ -52,6 +52,8 @@ type AuthContextValue = {
     password: string;
   }) => Promise<void>;
   logout: () => void;
+  /** Re-fetch user+company after settings change (e.g. rename, currency) */
+  refreshMe: () => Promise<void>;
 };
 
 const AuthContext = createContext<AuthContextValue | null>(null);
@@ -111,9 +113,15 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setCompany(null);
   }
 
+  async function refreshMe() {
+    const data = await api<MeResponse>("/auth/me");
+    setUser(data.user);
+    setCompany(data.company);
+  }
+
   return (
     <AuthContext.Provider
-      value={{ user, company, loading, login, register, logout }}
+      value={{ user, company, loading, login, register, logout, refreshMe }}
     >
       {children}
     </AuthContext.Provider>

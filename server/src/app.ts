@@ -16,6 +16,7 @@ import { stockRouter } from "./modules/stock/stock.routes.js";
 import { usersRouter } from "./modules/users/user.routes.js";
 import { categoriesRouter } from "./modules/categories/category.routes.js";
 import { reportsRouter } from "./modules/reports/report.routes.js";
+import { companyRouter } from "./modules/company/company.routes.js";
 import { errorHandler } from "./middleware/error.js";
 
 export const app = express();
@@ -40,6 +41,7 @@ app.use("/api/stock", stockRouter);
 app.use("/api/users", usersRouter);
 app.use("/api/categories", categoriesRouter);
 app.use("/api/reports", reportsRouter);
+app.use("/api/company", companyRouter);
 
 // --- 404 handler: anything that matched no route above ---
 app.use((_req, res) => {

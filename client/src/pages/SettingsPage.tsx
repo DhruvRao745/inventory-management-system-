@@ -23,10 +23,34 @@ type TeamUser = {
 const inputClass =
   "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400";
 
+const CURRENCIES = ["INR", "USD", "EUR", "GBP", "AED", "SGD"];
+
 export function SettingsPage() {
-  const { user: me } = useAuth();
+  const { user: me, company, refreshMe } = useAuth();
   const isAdmin = me?.role === "ADMIN";
   const canEditLocations = me?.role === "ADMIN" || me?.role === "MANAGER";
+
+  // --- company card ---
+  const [coName, setCoName] = useState(company?.name ?? "");
+  const [coCurrency, setCoCurrency] = useState(company?.currency ?? "INR");
+  const [coError, setCoError] = useState<string | null>(null);
+  const [coOk, setCoOk] = useState(false);
+
+  async function saveCompany(e: FormEvent) {
+    e.preventDefault();
+    setCoError(null);
+    setCoOk(false);
+    try {
+      await api("/company", {
+        method: "PATCH",
+        body: { name: coName, currency: coCurrency },
+      });
+      await refreshMe(); // sidebar name + money formatting update everywhere
+      setCoOk(true);
+    } catch (err) {
+      setCoError(err instanceof ApiError ? err.message : "Save failed");
+    }
+  }
 
   // --- data ---
   const [locations, setLocations] = useState<Location[]>([]);
@@ -151,6 +175,55 @@ export function SettingsPage() {
         <p className="mt-4 text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2 inline-block">
           {error}
         </p>
+      )}
+
+      {/* ---------- Company ---------- */}
+      {isAdmin && (
+        <div className="mt-6 max-w-3xl">
+          <h2 className="text-sm font-semibold text-slate-600 uppercase tracking-wide">
+            Company
+          </h2>
+          <form
+            onSubmit={saveCompany}
+            className="mt-3 bg-white rounded-xl shadow-sm p-5 flex items-end gap-3 flex-wrap"
+          >
+            <div className="flex-1 min-w-48">
+              <label className="block text-sm text-slate-600 mb-1">
+                Company name
+              </label>
+              <input
+                required
+                minLength={2}
+                value={coName}
+                onChange={(e) => setCoName(e.target.value)}
+                className={inputClass}
+              />
+            </div>
+            <div>
+              <label className="block text-sm text-slate-600 mb-1">
+                Currency
+              </label>
+              <select
+                value={coCurrency}
+                onChange={(e) => setCoCurrency(e.target.value)}
+                className={inputClass}
+              >
+                {CURRENCIES.map((c) => (
+                  <option key={c} value={c}>
+                    {c}
+                  </option>
+                ))}
+              </select>
+            </div>
+            <button className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700">
+              Save
+            </button>
+            {coOk && <span className="text-sm text-green-700">Saved ✓</span>}
+            {coError && (
+              <span className="text-sm text-red-600">{coError}</span>
+            )}
+          </form>
+        </div>
       )}
 
       {/* ---------- Locations ---------- */}

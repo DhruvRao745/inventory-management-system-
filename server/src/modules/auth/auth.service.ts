@@ -106,7 +106,11 @@ export async function register(input: RegisterInput) {
   return {
     ...tokens,
     user: publicUser(result.user),
-    company: { id: result.company.id, name: result.company.name },
+    company: {
+      id: result.company.id,
+      name: result.company.name,
+      currency: result.company.currency,
+    },
   };
 }
 
@@ -135,7 +139,11 @@ export async function login(input: LoginInput) {
   return {
     ...tokens,
     user: publicUser(user),
-    company: { id: user.company.id, name: user.company.name },
+    company: {
+      id: user.company.id,
+      name: user.company.name,
+      currency: user.company.currency,
+    },
   };
 }
 
@@ -182,6 +190,10 @@ export async function getMe(userId: string) {
   }
   return {
     user: publicUser(user),
-    company: { id: user.company.id, name: user.company.name },
+    company: {
+      id: user.company.id,
+      name: user.company.name,
+      currency: user.company.currency,
+    },
   };
 }

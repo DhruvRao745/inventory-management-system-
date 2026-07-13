@@ -8,11 +8,14 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import type { Product, StockLevel, StockMovement } from "../lib/types";
+import { formatMoney } from "../lib/format";
+import { useAuth } from "../context/AuthContext";
 
 type MovementsResponse = { items: StockMovement[]; total: number };
 
 export function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
+  const { company } = useAuth();
 
   const [product, setProduct] = useState<Product | null>(null);
   const [levels, setLevels] = useState<StockLevel[]>([]);
@@ -97,13 +100,13 @@ export function ProductDetailPage() {
           <div>
             <div className="text-slate-400 text-xs">Cost price</div>
             <div className="text-slate-800">
-              ₹{Number(product.costPrice).toFixed(2)}
+              {formatMoney(Number(product.costPrice), company?.currency)}
             </div>
           </div>
           <div>
             <div className="text-slate-400 text-xs">Selling price</div>
             <div className="text-slate-800">
-              ₹{Number(product.sellingPrice).toFixed(2)}
+              {formatMoney(Number(product.sellingPrice), company?.currency)}
             </div>
           </div>
           <div>

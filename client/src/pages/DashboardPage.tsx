@@ -11,10 +11,13 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import type { Product, StockLevel, StockMovement } from "../lib/types";
+import { formatMoney } from "../lib/format";
+import { useAuth } from "../context/AuthContext";
 
 type MovementsResponse = { items: StockMovement[]; total: number };
 
 export function DashboardPage() {
+  const { company } = useAuth();
   const [products, setProducts] = useState<Product[]>([]);
   const [levels, setLevels] = useState<StockLevel[]>([]);
   const [recent, setRecent] = useState<StockMovement[]>([]);
@@ -64,9 +67,7 @@ export function DashboardPage() {
     { label: "Units in stock", value: totalUnits },
     {
       label: "Stock value (cost)",
-      value: `₹${stockValue.toLocaleString("en-IN", {
-        maximumFractionDigits: 0,
-      })}`,
+      value: formatMoney(stockValue, company?.currency, 0),
     },
     {
       label: "Low stock items",
