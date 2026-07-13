@@ -210,6 +210,7 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
     where: {
       companyId,
       ...(q.locationId ? { locationId: q.locationId } : {}),
+      ...(q.productId ? { productId: q.productId } : {}),
     },
     _sum: { quantity: true },
   });

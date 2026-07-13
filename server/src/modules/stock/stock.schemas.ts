@@ -59,6 +59,7 @@ export const listMovementsQuerySchema = z.object({
 
 export const levelsQuerySchema = z.object({
   locationId: z.string().optional(),
+  productId: z.string().optional(),
 });
 
 export type CreateMovementInput = z.infer<typeof createMovementSchema>;

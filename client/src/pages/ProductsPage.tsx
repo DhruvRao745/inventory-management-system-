@@ -11,6 +11,7 @@
  * slightly more traffic, much harder to get wrong. Start simple.
  */
 import { useEffect, useState, type FormEvent } from "react";
+import { Link } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import type { Product } from "../lib/types";
 import { useAuth } from "../context/AuthContext";
@@ -279,7 +280,14 @@ export function ProductsPage() {
                   <td className="px-4 py-3 font-mono text-xs text-slate-500">
                     {p.sku}
                   </td>
-                  <td className="px-4 py-3 text-slate-800">{p.name}</td>
+                  <td className="px-4 py-3">
+                    <Link
+                      to={`/products/${p.id}`}
+                      className="text-slate-800 hover:underline"
+                    >
+                      {p.name}
+                    </Link>
+                  </td>
                   <td className="px-4 py-3 text-slate-500">{p.unit}</td>
                   <td className="px-4 py-3 text-right text-slate-500">
                     {Number(p.costPrice).toFixed(2)}
