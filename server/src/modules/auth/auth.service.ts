@@ -14,9 +14,26 @@ import { AppError } from "../../middleware/error.js";
 import type { RegisterInput, LoginInput } from "./auth.schemas.js";
 import type { AuthPayload } from "../../middleware/auth.js";
 
-/** Print a badge: a signed note saying who you are + your company. */
-function signToken(payload: AuthPayload): string {
-  return jwt.sign(payload, env.JWT_SECRET, { expiresIn: "7d" });
+/**
+ * Two badges:
+ * - access token  = the DAY PASS: shown at every door, expires in 15 min.
+ *   If stolen, it's useless within minutes.
+ * - refresh token = the RENEWAL CARD: used only at /auth/refresh to print
+ *   a fresh day pass. Different secret, lasts 30 days.
+ */
+function signAccessToken(payload: AuthPayload): string {
+  return jwt.sign(payload, env.JWT_SECRET, { expiresIn: "15m" });
+}
+
+function signRefreshToken(userId: string): string {
+  return jwt.sign({ userId }, env.JWT_REFRESH_SECRET, { expiresIn: "30d" });
+}
+
+function signTokenPair(payload: AuthPayload) {
+  return {
+    token: signAccessToken(payload),
+    refreshToken: signRefreshToken(payload.userId),
+  };
 }
 
 /** What we send back — note: NEVER the passwordHash. */
@@ -80,14 +97,14 @@ export async function register(input: RegisterInput) {
     return { company, user };
   });
 
-  const token = signToken({
+  const tokens = signTokenPair({
     userId: result.user.id,
     companyId: result.company.id,
     role: "ADMIN",
   });
 
   return {
-    token,
+    ...tokens,
     user: publicUser(result.user),
     company: { id: result.company.id, name: result.company.name },
   };
@@ -109,16 +126,48 @@ export async function login(input: LoginInput) {
     throw new AppError(401, "Invalid email or password");
   }
 
-  const token = signToken({
+  const tokens = signTokenPair({
     userId: user.id,
     companyId: user.companyId,
     role: user.role,
   });
 
   return {
-    token,
+    ...tokens,
     user: publicUser(user),
     company: { id: user.company.id, name: user.company.name },
+  };
+}
+
+/**
+ * The renewal counter: verify the renewal card, check the person
+ * still works here (not deactivated!), print a fresh day pass.
+ * Re-reading the user from the DB matters — their role may have
+ * changed since the card was issued.
+ */
+export async function refresh(refreshToken: string) {
+  let payload: { userId: string };
+  try {
+    payload = jwt.verify(refreshToken, env.JWT_REFRESH_SECRET) as {
+      userId: string;
+    };
+  } catch {
+    throw new AppError(401, "Session expired — please log in again");
+  }
+
+  const user = await prisma.user.findUnique({
+    where: { id: payload.userId },
+  });
+  if (!user || !user.isActive) {
+    throw new AppError(401, "Account not found or deactivated");
+  }
+
+  return {
+    token: signAccessToken({
+      userId: user.id,
+      companyId: user.companyId,
+      role: user.role,
+    }),
   };
 }
 

@@ -15,7 +15,13 @@ import {
   useState,
   type ReactNode,
 } from "react";
-import { api, getToken, setToken } from "../lib/api";
+import {
+  api,
+  getToken,
+  setToken,
+  setRefreshToken,
+  getRefreshToken,
+} from "../lib/api";
 
 export type User = {
   id: string;
@@ -26,7 +32,12 @@ export type User = {
 };
 export type Company = { id: string; name: string };
 
-type AuthResponse = { token: string; user: User; company: Company };
+type AuthResponse = {
+  token: string;
+  refreshToken: string;
+  user: User;
+  company: Company;
+};
 type MeResponse = { user: User; company: Company };
 
 type AuthContextValue = {
@@ -50,9 +61,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [company, setCompany] = useState<Company | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // On app start: if a token is stored, try to restore the session
+  // On app start: if any token is stored, try to restore the session
+  // (api() will quietly renew the day pass if it has expired)
   useEffect(() => {
-    if (!getToken()) {
+    if (!getToken() && !getRefreshToken()) {
       setLoading(false);
       return;
     }
@@ -71,6 +83,7 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       body: { email, password },
     });
     setToken(data.token);
+    setRefreshToken(data.refreshToken);
     setUser(data.user);
     setCompany(data.company);
   }
@@ -86,12 +99,14 @@ export function AuthProvider({ children }: { children: ReactNode }) {
       body: input,
     });
     setToken(data.token);
+    setRefreshToken(data.refreshToken);
     setUser(data.user);
     setCompany(data.company);
   }
 
   function logout() {
     setToken(null);
+    setRefreshToken(null);
     setUser(null);
     setCompany(null);
   }

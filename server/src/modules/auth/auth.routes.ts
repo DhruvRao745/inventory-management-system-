@@ -3,6 +3,7 @@
  * check the paperwork (schema), call the brain (service), send the answer.
  */
 import { Router } from "express";
+import { z } from "zod";
 import { registerSchema, loginSchema } from "./auth.schemas.js";
 import * as authService from "./auth.service.js";
 import { asyncHandler, AppError } from "../../middleware/error.js";
@@ -26,6 +27,18 @@ authRouter.post(
   asyncHandler(async (req, res) => {
     const input = loginSchema.parse(req.body);
     const result = await authService.login(input);
+    res.json(result);
+  })
+);
+
+// POST /api/auth/refresh — trade a renewal card for a fresh day pass
+authRouter.post(
+  "/refresh",
+  asyncHandler(async (req, res) => {
+    const { refreshToken } = z
+      .object({ refreshToken: z.string().min(1) })
+      .parse(req.body);
+    const result = await authService.refresh(refreshToken);
     res.json(result);
   })
 );
