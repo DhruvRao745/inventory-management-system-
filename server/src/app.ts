@@ -6,9 +6,11 @@
  * and hit it in-memory, and keeps "what the API does" separate from
  * "how it runs".
  */
+import path from "node:path";
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import { env } from "./config/env.js";
 import { authIpLimiter } from "./middleware/rateLimit.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { productsRouter } from "./modules/products/product.routes.js";
@@ -22,9 +24,19 @@ import { errorHandler } from "./middleware/error.js";
 
 export const app = express();
 
+const isProduction = env.NODE_ENV === "production";
+
+// Behind a proxy/load balancer (production), requests appear to come
+// from the proxy's IP. This tells Express to trust the proxy's
+// X-Forwarded-For header so rate limiters see the real visitor.
+if (isProduction) {
+  app.set("trust proxy", 1);
+}
+
 // --- Global middleware (runs on every request, in order) ---
-app.use(helmet()); // sets security-related HTTP headers
-app.use(cors({ origin: "http://localhost:5173", credentials: true })); // allow the React dev server to call us
+// contentSecurityPolicy off in dev only — it blocks Vite's live-reload
+app.use(helmet({ contentSecurityPolicy: isProduction ? undefined : false }));
+app.use(cors({ origin: env.CLIENT_ORIGIN, credentials: true })); // dev: allow the React dev server
 app.use(express.json()); // parse JSON request bodies into req.body
 
 // --- Routes ---
@@ -49,10 +61,29 @@ app.use("/api/categories", categoriesRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/company", companyRouter);
 
-// --- 404 handler: anything that matched no route above ---
-app.use((_req, res) => {
+// --- 404 for unknown API routes (always JSON, never HTML) ---
+app.use("/api", (_req, res) => {
   res.status(404).json({ error: "Not found" });
 });
+
+if (isProduction) {
+  // --- Production: Express serves the built React app itself ---
+  // The Docker build copies client/dist into server/public.
+  const publicDir = path.resolve(__dirname, "../public");
+  app.use(express.static(publicDir));
+
+  // SPA fallback: any non-API address returns index.html so React
+  // Router can handle it — this is what makes a bookmarked
+  // /products/abc123 survive a page refresh in production.
+  app.get("*", (_req, res) => {
+    res.sendFile(path.join(publicDir, "index.html"));
+  });
+} else {
+  // --- Development: Vite serves the client; anything else is a 404 ---
+  app.use((_req, res) => {
+    res.status(404).json({ error: "Not found" });
+  });
+}
 
 // --- Error handler: MUST be last. All errors flow down here. ---
 app.use(errorHandler);

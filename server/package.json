@@ -4,6 +4,9 @@
   "version": "0.1.0",
   "description": "Inventory API — Express + TypeScript + Prisma",
   "main": "dist/index.js",
+  "prisma": {
+    "seed": "tsx prisma/seed.ts"
+  },
   "scripts": {
     "dev": "tsx watch src/index.ts",
     "build": "tsc",

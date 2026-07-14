@@ -17,6 +17,9 @@ const envSchema = z.object({
   DATABASE_URL: z.string().min(1, "DATABASE_URL is required"),
   JWT_SECRET: z.string().min(1, "JWT_SECRET is required"),
   JWT_REFRESH_SECRET: z.string().min(1, "JWT_REFRESH_SECRET is required"),
+  // Where the React dev server runs (for CORS). Irrelevant in production,
+  // where Express serves the client itself — same origin, no CORS needed.
+  CLIENT_ORIGIN: z.string().default("http://localhost:5173"),
 });
 
 const parsed = envSchema.safeParse(process.env);
