@@ -8,6 +8,7 @@ import { registerSchema, loginSchema } from "./auth.schemas.js";
 import * as authService from "./auth.service.js";
 import { asyncHandler, AppError } from "../../middleware/error.js";
 import { requireAuth, type AuthRequest } from "../../middleware/auth.js";
+import { loginLimiter } from "../../middleware/rateLimit.js";
 
 export const authRouter = Router();
 
@@ -22,8 +23,10 @@ authRouter.post(
 );
 
 // POST /api/auth/login — returns the badge (token)
+// loginLimiter: 10 failed tries per IP+email, then 15 min cooldown
 authRouter.post(
   "/login",
+  loginLimiter,
   asyncHandler(async (req, res) => {
     const input = loginSchema.parse(req.body);
     const result = await authService.login(input);

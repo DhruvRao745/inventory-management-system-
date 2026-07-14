@@ -9,6 +9,7 @@
 import express from "express";
 import cors from "cors";
 import helmet from "helmet";
+import { authIpLimiter } from "./middleware/rateLimit.js";
 import { authRouter } from "./modules/auth/auth.routes.js";
 import { productsRouter } from "./modules/products/product.routes.js";
 import { locationsRouter } from "./modules/locations/location.routes.js";
@@ -33,8 +34,13 @@ app.get("/api/health", (_req, res) => {
   res.json({ status: "ok", service: "inventory-api", time: new Date().toISOString() });
 });
 
+// Rate limiting: loose per-IP net over all auth routes; the strict
+// per-credential bouncer sits directly on the login route itself.
+// (When deployed behind a proxy, set app.set("trust proxy", 1) so
+// limiters see the real visitor IP, not the proxy's.)
+
 // Feature modules — each mounted under its own /api prefix
-app.use("/api/auth", authRouter);
+app.use("/api/auth", authIpLimiter, authRouter);
 app.use("/api/products", productsRouter);
 app.use("/api/locations", locationsRouter);
 app.use("/api/stock", stockRouter);
