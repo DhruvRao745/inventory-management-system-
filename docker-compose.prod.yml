@@ -1,0 +1,44 @@
+# Production compose: the app container + Postgres, wired together.
+#
+#   docker compose -f docker-compose.prod.yml up --build -d
+#
+# IMPORTANT for a real server: set real secrets via environment
+# variables or an .env file next to this compose file:
+#   POSTGRES_PASSWORD, JWT_SECRET, JWT_REFRESH_SECRET
+# The ${VAR:-fallback} values below are for local testing ONLY.
+services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: inventory
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-inventory_dev_password}
+      POSTGRES_DB: inventory
+    volumes:
+      - inventory_prod_pgdata:/var/lib/postgresql/data
+    # healthcheck: the app waits until Postgres actually ACCEPTS
+    # connections, not merely until the container exists
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U inventory"]
+      interval: 3s
+      timeout: 3s
+      retries: 10
+
+  app:
+    build: .
+    restart: unless-stopped
+    ports:
+      - "5000:5000"
+    environment:
+      # "db" is the service name above — inside Docker's network,
+      # containers reach each other by name, not localhost
+      DATABASE_URL: postgresql://inventory:${POSTGRES_PASSWORD:-inventory_dev_password}@db:5432/inventory
+      JWT_SECRET: ${JWT_SECRET:-local-test-only-secret}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-local-test-only-refresh}
+      NODE_ENV: production
+    depends_on:
+      db:
+        condition: service_healthy
+
+volumes:
+  inventory_prod_pgdata:

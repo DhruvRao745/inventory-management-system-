@@ -22,8 +22,10 @@ RUN npm ci
 COPY . .
 
 # 3. Build: generate the Prisma client, compile server TS → dist,
-#    build the React app, and hand its files to Express to serve
-RUN npx prisma generate --schema server/prisma/schema.prisma \
+#    build the React app, and hand its files to Express to serve.
+#    Prisma runs FROM the server folder — in a workspaces install its
+#    binary may live in server/node_modules/.bin, not the root's.
+RUN cd server && npx prisma generate && cd .. \
     && npm run build \
     && cp -r client/dist server/public
 
@@ -33,4 +35,4 @@ EXPOSE 5000
 # 4. On every start: apply any pending migrations, then run.
 #    `migrate deploy` only applies committed migration files —
 #    it never guesses or drifts. New version = new migrations applied.
-CMD ["sh", "-c", "npx prisma migrate deploy --schema server/prisma/schema.prisma && node server/dist/index.js"]
+CMD ["sh", "-c", "cd server && npx prisma migrate deploy && node dist/index.js"]

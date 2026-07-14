@@ -1,0 +1,12 @@
+# Never copy these into the image — they're rebuilt inside it,
+# secret, or just dead weight.
+node_modules
+*/node_modules
+client/dist
+server/dist
+server/public
+.git
+.env
+*/.env
+*.md
+Inventory-PRD.docx
