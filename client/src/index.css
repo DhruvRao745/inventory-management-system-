@@ -1,3 +1,17 @@
-/* Tailwind v4: this single import pulls in the whole framework.
-   Utility classes (flex, p-4, text-lg...) become available in all components. */
+/* Tailwind v4: this single import pulls in the whole framework. */
 @import "tailwindcss";
+
+/* Design tokens — decided ONCE, used everywhere.
+   @theme lets Tailwind classes (font-sans, etc.) use our choices. */
+@theme {
+  --font-sans: "Inter", ui-sans-serif, system-ui, sans-serif;
+}
+
+body {
+  @apply antialiased text-slate-800;
+}
+
+/* text selection in brand color — tiny detail, feels intentional */
+::selection {
+  @apply bg-indigo-100 text-indigo-900;
+}

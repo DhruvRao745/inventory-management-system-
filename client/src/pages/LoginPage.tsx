@@ -1,13 +1,12 @@
 /**
- * Login form. The React pattern to learn here:
- * - each input's value lives in state (useState)
- * - submit calls the API via our auth context
- * - errors from the server are shown to the human, not the console
+ * Login — neubrutalist card, straight from the user's chosen design:
+ * lightgrey panel, hard borders, offset shadows, press-down button.
  */
 import { useState, type FormEvent } from "react";
 import { Link, useNavigate } from "react-router-dom";
 import { useAuth } from "../context/AuthContext";
 import { ApiError } from "../lib/api";
+import { Button, Input, ErrorAlert, Logo } from "../components/ui";
 
 export function LoginPage() {
   const { login } = useAuth();
@@ -19,12 +18,12 @@ export function LoginPage() {
   const [busy, setBusy] = useState(false);
 
   async function handleSubmit(e: FormEvent) {
-    e.preventDefault(); // stop the browser's old-school full page reload
+    e.preventDefault();
     setError(null);
     setBusy(true);
     try {
       await login(email, password);
-      navigate("/"); // success → go to dashboard
+      navigate("/");
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Login failed");
     } finally {
@@ -33,58 +32,92 @@ export function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen bg-slate-50 flex items-center justify-center p-4">
-      <div className="bg-white rounded-xl shadow-md p-8 w-full max-w-sm">
-        <h1 className="text-2xl font-bold text-slate-800">Inventory</h1>
-        <p className="text-slate-500 mt-1 text-sm">Sign in to your company</p>
-
-        <form onSubmit={handleSubmit} className="mt-6 space-y-4">
-          <div>
-            <label className="block text-sm font-medium text-slate-600 mb-1">
-              Email
-            </label>
-            <input
-              type="email"
-              required
-              value={email}
-              onChange={(e) => setEmail(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-            />
-          </div>
-          <div>
-            <label className="block text-sm font-medium text-slate-600 mb-1">
-              Password
-            </label>
-            <input
-              type="password"
-              required
-              value={password}
-              onChange={(e) => setPassword(e.target.value)}
-              className="w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400"
-            />
+    // dot-grid background: the classic neubrutalist "graph paper" stage
+    <div className="min-h-screen bg-[#f4f4f4] bg-[radial-gradient(#32323226_1.5px,transparent_1.5px)] bg-[size:18px_18px]">
+      <div className="mx-auto flex min-h-screen max-w-5xl flex-col items-center justify-center gap-10 p-6 lg:flex-row lg:gap-20">
+        {/* Brand side — big type and sticker chips fill the stage */}
+        <div className="flex max-w-md flex-col items-start gap-6">
+          <div className="flex items-center gap-3">
+            <Logo size={44} />
+            <span className="text-3xl font-black tracking-tight text-[#323232]">
+              StockPilot
+            </span>
           </div>
 
-          {error && (
-            <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
-              {error}
-            </p>
-          )}
+          <h1 className="text-4xl font-black leading-tight text-[#323232]">
+            Every unit,
+            <br />
+            <span className="bg-[#2d8cf0] px-2 text-white shadow-[4px_4px_0px_#323232]">
+              accounted for.
+            </span>
+          </h1>
 
-          <button
+          <p className="font-semibold text-[#666]">
+            Track stock across locations with a tamper-proof record of every
+            movement — who, what, when.
+          </p>
+
+          {/* sticker chips */}
+          <div className="flex flex-wrap gap-3">
+            {["📦 Multi-location", "🧾 Audit trail", "👥 Team roles"].map(
+              (chip) => (
+                <span
+                  key={chip}
+                  className="rounded-[5px] border-2 border-[#323232] bg-white px-3 py-1.5 text-sm font-bold text-[#323232] shadow-[4px_4px_0px_#323232]"
+                >
+                  {chip}
+                </span>
+              )
+            )}
+          </div>
+        </div>
+
+        <form
+        onSubmit={handleSubmit}
+        className="flex w-full max-w-xs flex-col gap-5 rounded-[5px] border-2 border-[#323232] bg-[#d3d3d3] p-6 shadow-[4px_4px_0px_#323232]"
+      >
+        <div className="mb-2">
+          <div className="text-xl font-black text-[#323232]">Welcome,</div>
+          <div className="text-base font-semibold text-[#666]">
+            sign in to continue
+          </div>
+        </div>
+
+        <Input
+          type="email"
+          required
+          autoComplete="email"
+          placeholder="Email"
+          value={email}
+          onChange={(e) => setEmail(e.target.value)}
+        />
+        <Input
+          type="password"
+          required
+          autoComplete="current-password"
+          placeholder="Password"
+          value={password}
+          onChange={(e) => setPassword(e.target.value)}
+        />
+
+        {error && <ErrorAlert>{error}</ErrorAlert>}
+
+          <Button
             type="submit"
+            variant="secondary"
             disabled={busy}
-            className="w-full rounded-lg bg-slate-900 text-white py-2 text-sm font-medium hover:bg-slate-700 disabled:opacity-50"
+            className="mx-auto mt-4 w-36"
           >
-            {busy ? "Signing in…" : "Sign in"}
-          </button>
-        </form>
+            {busy ? "Signing in…" : "Let's go →"}
+          </Button>
 
-        <p className="mt-4 text-sm text-slate-500">
-          New company?{" "}
-          <Link to="/register" className="text-slate-900 font-medium underline">
-            Register here
-          </Link>
-        </p>
+          <p className="text-center text-sm font-semibold text-[#666]">
+            New company?{" "}
+            <Link to="/register" className="text-[#2d8cf0] underline">
+              Create a workspace
+            </Link>
+          </p>
+        </form>
       </div>
     </div>
   );

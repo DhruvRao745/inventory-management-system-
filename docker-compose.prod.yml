@@ -6,6 +6,13 @@
 # variables or an .env file next to this compose file:
 #   POSTGRES_PASSWORD, JWT_SECRET, JWT_REFRESH_SECRET
 # The ${VAR:-fallback} values below are for local testing ONLY.
+
+# Distinct project name — keeps this stack completely separate from the
+# dev compose file. Without it, both files claim the folder name
+# "inventory" as their project, and Compose treats their "db" services
+# as the same thing (this once deleted our dev database container).
+name: inventory-prod
+
 services:
   db:
     image: postgres:16-alpine
