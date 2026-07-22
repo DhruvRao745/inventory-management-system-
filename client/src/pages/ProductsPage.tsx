@@ -1,28 +1,28 @@
 /**
- * Products page — the item register on screen.
- *
- * The rhythm of every data page:
- *   1. state for the data + loading + error
- *   2. a load() function that calls the API
- *   3. useEffect(load, []) — fetch when the page opens
- *   4. after any change (create/edit/retire) → load() again
- *
- * We re-fetch after changes instead of hand-editing local state —
- * slightly more traffic, much harder to get wrong. Start simple.
+ * Products page — neubrutalist edition. Same logic as before;
+ * presentation rebuilt on the token system.
  */
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import type { Product } from "../lib/types";
+import type { Product, StockLevel } from "../lib/types";
 import { useAuth } from "../context/AuthContext";
 import { Modal } from "../components/Modal";
+import { hashColor } from "../lib/colors";
+import {
+  Button,
+  Input,
+  Select,
+  Field,
+  ErrorAlert,
+  cardClass,
+} from "../components/ui";
 
-// One object holds the form; empty strings for a fresh form
 const emptyForm = {
   sku: "",
   name: "",
   description: "",
-  categoryId: "", // "" = no category
+  categoryId: "",
   unit: "pcs",
   costPrice: "0",
   sellingPrice: "0",
@@ -31,42 +31,59 @@ const emptyForm = {
 type ProductForm = typeof emptyForm;
 
 type CategoryWithCount = { id: string; name: string; productCount: number };
+type ProductsResponse = {
+  items: Product[];
+  total: number;
+  take: number;
+  skip: number;
+};
+
+const PAGE_SIZE = 25;
+
+const th =
+  "px-4 py-3 text-left text-xs font-black uppercase tracking-wide text-[var(--muted)]";
+const td = "px-4 py-3 text-sm";
 
 export function ProductsPage() {
   const { user } = useAuth();
   const canWrite = user?.role === "ADMIN" || user?.role === "MANAGER";
 
-  // --- state ---
   const [products, setProducts] = useState<Product[]>([]);
+  const [total, setTotal] = useState(0);
+  const [skip, setSkip] = useState(0);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [search, setSearch] = useState("");
+
+  // stock-on-hand per product (summed over locations) + low-stock flags
+  const [onHand, setOnHand] = useState<Map<string, number>>(new Map());
+  const [lowIds, setLowIds] = useState<Set<string>>(new Set());
   const [categories, setCategories] = useState<CategoryWithCount[]>([]);
   const [categoryFilter, setCategoryFilter] = useState("");
 
-  // manage-categories modal
   const [catModalOpen, setCatModalOpen] = useState(false);
   const [newCatName, setNewCatName] = useState("");
   const [catError, setCatError] = useState<string | null>(null);
 
-  // modal state: closed | adding | editing a specific product
   const [modal, setModal] = useState<"closed" | "add" | "edit">("closed");
   const [editingId, setEditingId] = useState<string | null>(null);
   const [form, setForm] = useState<ProductForm>(emptyForm);
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  // --- data loading ---
-  async function load(searchTerm = "", catId = "") {
+  async function load(searchTerm = "", catId = "", skipVal = 0) {
     setLoading(true);
     setError(null);
     try {
-      // URLSearchParams builds "?search=pen&categoryId=..." safely
       const params = new URLSearchParams();
       if (searchTerm) params.set("search", searchTerm);
       if (catId) params.set("categoryId", catId);
-      const query = params.toString() ? `?${params.toString()}` : "";
-      setProducts(await api<Product[]>(`/products${query}`));
+      params.set("take", String(PAGE_SIZE));
+      params.set("skip", String(skipVal));
+      const data = await api<ProductsResponse>(`/products?${params}`);
+      setProducts(data.items);
+      setTotal(data.total);
+      setSkip(data.skip);
     } catch (err) {
       setError(err instanceof ApiError ? err.message : "Failed to load");
     } finally {
@@ -78,17 +95,29 @@ export function ProductsPage() {
     setCategories(await api<CategoryWithCount[]>("/categories"));
   }
 
+  async function loadLevels() {
+    const levels = await api<StockLevel[]>("/stock/levels");
+    const sums = new Map<string, number>();
+    const low = new Set<string>();
+    for (const l of levels) {
+      sums.set(l.product.id, (sums.get(l.product.id) ?? 0) + l.quantity);
+      if (l.lowStock) low.add(l.product.id);
+    }
+    setOnHand(sums);
+    setLowIds(low);
+  }
+
   useEffect(() => {
     load();
     loadCategories();
+    loadLevels();
   }, []);
 
   function handleSearch(e: FormEvent) {
     e.preventDefault();
-    load(search, categoryFilter);
+    load(search, categoryFilter, 0); // new search → back to page 1
   }
 
-  // --- modal helpers ---
   function openAdd() {
     setForm(emptyForm);
     setFormError(null);
@@ -115,25 +144,20 @@ export function ProductsPage() {
     setForm((f) => ({ ...f, [field]: value }));
   }
 
-  // --- actions ---
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setFormError(null);
     setBusy(true);
-
-    // The form keeps everything as strings (inputs are text);
-    // the API wants real numbers — convert at the boundary.
     const body = {
       sku: form.sku,
       name: form.name,
       description: form.description || undefined,
-      categoryId: form.categoryId, // "" means "no category" — server stores null
+      categoryId: form.categoryId,
       unit: form.unit,
       costPrice: Number(form.costPrice),
       sellingPrice: Number(form.sellingPrice),
       lowStockThreshold: Number(form.lowStockThreshold),
     };
-
     try {
       if (modal === "add") {
         await api("/products", { method: "POST", body });
@@ -141,8 +165,9 @@ export function ProductsPage() {
         await api(`/products/${editingId}`, { method: "PATCH", body });
       }
       setModal("closed");
-      await load(search, categoryFilter);
-      await loadCategories(); // product counts may have changed
+      await load(search, categoryFilter, skip);
+      await loadCategories();
+      await loadLevels();
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : "Save failed");
     } finally {
@@ -155,13 +180,13 @@ export function ProductsPage() {
       return;
     try {
       await api(`/products/${p.id}`, { method: "DELETE" });
-      await load(search, categoryFilter);
+      await load(search, categoryFilter, skip);
+      await loadLevels();
     } catch (err) {
       alert(err instanceof ApiError ? err.message : "Failed to retire");
     }
   }
 
-  // --- category management ---
   async function addCategory(e: FormEvent) {
     e.preventDefault();
     setCatError(null);
@@ -183,132 +208,177 @@ export function ProductsPage() {
     try {
       await api(`/categories/${c.id}`, { method: "DELETE" });
       await loadCategories();
-      await load(search, categoryFilter);
+      await load(search, categoryFilter, skip);
     } catch (err) {
       alert(err instanceof ApiError ? err.message : "Failed to delete");
     }
   }
 
-  const inputClass =
-    "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400";
-
-  // --- render ---
   return (
-    <div>
-      <div className="flex items-center justify-between">
-        <h1 className="text-xl font-bold text-slate-800">Products</h1>
-        {canWrite && (
-          <button
-            onClick={openAdd}
-            className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700"
+    <div className="space-y-5">
+      {/* Toolbar */}
+      <div className="flex flex-wrap items-center gap-3">
+        <form onSubmit={handleSearch} className="flex flex-wrap items-center gap-3">
+          <Input
+            value={search}
+            onChange={(e) => setSearch(e.target.value)}
+            placeholder="Search by name or SKU…"
+            className="w-64"
+          />
+          <Select
+            value={categoryFilter}
+            onChange={(e) => {
+              setCategoryFilter(e.target.value);
+              load(search, e.target.value, 0);
+            }}
+            className="w-48"
           >
-            + Add product
-          </button>
+            <option value="">All categories</option>
+            {categories.map((c) => (
+              <option key={c.id} value={c.id}>
+                {c.name} ({c.productCount})
+              </option>
+            ))}
+          </Select>
+          <Button variant="secondary" type="submit">
+            Search
+          </Button>
+        </form>
+        {canWrite && (
+          <>
+            <button
+              type="button"
+              onClick={() => {
+                setCatError(null);
+                setCatModalOpen(true);
+              }}
+              className="text-sm font-bold text-[var(--muted)] underline hover:text-[var(--text)]"
+            >
+              Manage categories
+            </button>
+            <div className="ml-auto">
+              <Button onClick={openAdd}>+ Add product</Button>
+            </div>
+          </>
         )}
       </div>
 
-      {/* Search + category filter */}
-      <form onSubmit={handleSearch} className="mt-4 flex gap-2 items-center">
-        <input
-          value={search}
-          onChange={(e) => setSearch(e.target.value)}
-          placeholder="Search by name or SKU…"
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm w-64 focus:outline-none focus:ring-2 focus:ring-slate-400"
-        />
-        <select
-          value={categoryFilter}
-          onChange={(e) => {
-            setCategoryFilter(e.target.value);
-            load(search, e.target.value); // filter applies immediately
-          }}
-          className="rounded-lg border border-slate-300 px-3 py-2 text-sm"
-        >
-          <option value="">All categories</option>
-          {categories.map((c) => (
-            <option key={c.id} value={c.id}>
-              {c.name} ({c.productCount})
-            </option>
-          ))}
-        </select>
-        <button className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-100">
-          Search
-        </button>
-        {canWrite && (
-          <button
-            type="button"
-            onClick={() => {
-              setCatError(null);
-              setCatModalOpen(true);
-            }}
-            className="text-sm text-slate-500 underline hover:text-slate-800 ml-2"
-          >
-            Manage categories
-          </button>
-        )}
-      </form>
-
-      {/* The three states of every data page */}
-      {loading && <p className="mt-6 text-slate-400 text-sm">Loading…</p>}
-      {error && (
-        <p className="mt-6 text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
-          {error}
-        </p>
+      {/* States */}
+      {loading && (
+        <p className="text-sm font-bold text-[var(--muted)]">Loading…</p>
       )}
+      {error && <ErrorAlert>{error}</ErrorAlert>}
       {!loading && !error && products.length === 0 && (
-        <p className="mt-6 text-slate-400 text-sm">
-          No products yet. {canWrite && "Add your first one!"}
-        </p>
+        <div className={`${cardClass} p-8 text-center`}>
+          <div className="text-lg font-black text-[var(--text)]">
+            No products yet
+          </div>
+          <p className="mt-1 text-sm font-semibold text-[var(--muted)]">
+            {canWrite
+              ? "Add your first product to start tracking stock."
+              : "Nothing here yet."}
+          </p>
+          {canWrite && (
+            <div className="mt-4">
+              <Button onClick={openAdd}>+ Add product</Button>
+            </div>
+          )}
+        </div>
       )}
 
+      {/* Table */}
       {!loading && !error && products.length > 0 && (
-        <div className="mt-4 bg-white rounded-xl shadow-sm overflow-hidden">
-          <table className="w-full text-sm">
+        <div className={`${cardClass} overflow-x-auto`}>
+          <table className="w-full">
             <thead>
-              <tr className="bg-slate-50 text-left text-slate-500">
-                <th className="px-4 py-3 font-medium">SKU</th>
-                <th className="px-4 py-3 font-medium">Name</th>
-                <th className="px-4 py-3 font-medium">Unit</th>
-                <th className="px-4 py-3 font-medium text-right">Cost</th>
-                <th className="px-4 py-3 font-medium text-right">Price</th>
-                <th className="px-4 py-3 font-medium text-right">Alert below</th>
-                {canWrite && <th className="px-4 py-3" />}
+              <tr className="border-b-2 border-[var(--line)] bg-[var(--panel)]">
+                <th className={th}>SKU</th>
+                <th className={th}>Name</th>
+                <th className={th}>Category</th>
+                <th className={th}>Unit</th>
+                <th className={`${th} text-right`}>On hand</th>
+                <th className={`${th} text-right`}>Cost</th>
+                <th className={`${th} text-right`}>Price</th>
+                <th className={`${th} text-right`}>Alert below</th>
+                {canWrite && <th className={th} />}
               </tr>
             </thead>
-            <tbody>
+            <tbody className="divide-y-2 divide-[var(--line)]/20">
               {products.map((p) => (
-                <tr key={p.id} className="border-t border-slate-100">
-                  <td className="px-4 py-3 font-mono text-xs text-slate-500">
+                <tr
+                  key={p.id}
+                  className="hover:bg-[var(--hover)]"
+                  style={
+                    lowIds.has(p.id)
+                      ? { background: "rgba(239, 68, 68, 0.07)" }
+                      : undefined
+                  }
+                >
+                  <td className={`${td} font-mono text-xs text-[var(--muted)]`}>
                     {p.sku}
                   </td>
-                  <td className="px-4 py-3">
+                  <td className={td}>
                     <Link
                       to={`/products/${p.id}`}
-                      className="text-slate-800 hover:underline"
+                      className="font-bold text-[var(--text)] hover:underline"
                     >
                       {p.name}
                     </Link>
+                    {lowIds.has(p.id) && (
+                      <span
+                        className="ml-2 text-xs font-black text-red-500"
+                        title="Low stock at one or more locations"
+                      >
+                        ⚠ low
+                      </span>
+                    )}
                   </td>
-                  <td className="px-4 py-3 text-slate-500">{p.unit}</td>
-                  <td className="px-4 py-3 text-right text-slate-500">
+                  <td className={td}>
+                    {p.category ? (
+                      <span
+                        className="rounded-[4px] border-2 border-[var(--line)] px-2 py-0.5 text-xs font-black text-white"
+                        style={{ background: hashColor(p.category.name) }}
+                      >
+                        {p.category.name}
+                      </span>
+                    ) : (
+                      <span className="text-xs text-[var(--muted)]/50">—</span>
+                    )}
+                  </td>
+                  <td className={`${td} font-semibold text-[var(--muted)]`}>
+                    {p.unit}
+                  </td>
+                  <td
+                    className={`${td} text-right font-black ${
+                      lowIds.has(p.id) ? "text-red-500" : "text-[var(--text)]"
+                    }`}
+                  >
+                    {onHand.get(p.id) ?? 0}
+                  </td>
+                  <td
+                    className={`${td} text-right font-semibold text-[var(--muted)]`}
+                  >
                     {Number(p.costPrice).toFixed(2)}
                   </td>
-                  <td className="px-4 py-3 text-right text-slate-800">
+                  <td className={`${td} text-right font-bold text-[var(--text)]`}>
                     {Number(p.sellingPrice).toFixed(2)}
                   </td>
-                  <td className="px-4 py-3 text-right text-slate-500">
+                  <td
+                    className={`${td} text-right font-semibold text-[var(--muted)]`}
+                  >
                     {p.lowStockThreshold}
                   </td>
                   {canWrite && (
-                    <td className="px-4 py-3 text-right space-x-3 whitespace-nowrap">
+                    <td className={`${td} whitespace-nowrap text-right`}>
                       <button
                         onClick={() => openEdit(p)}
-                        className="text-slate-500 hover:text-slate-900"
+                        className="font-bold text-[var(--muted)] hover:text-[var(--accent)]"
                       >
                         Edit
                       </button>
                       <button
                         onClick={() => handleRetire(p)}
-                        className="text-slate-400 hover:text-red-600"
+                        className="ml-4 font-bold text-[var(--muted)]/60 hover:text-red-500"
                       >
                         Retire
                       </button>
@@ -318,63 +388,81 @@ export function ProductsPage() {
               ))}
             </tbody>
           </table>
+          <div className="flex items-center justify-between border-t-2 border-[var(--line)] bg-[var(--panel)] px-4 py-2.5">
+            <span className="text-xs font-bold text-[var(--muted)]">
+              Showing {total === 0 ? 0 : skip + 1}–{skip + products.length} of{" "}
+              {total}
+            </span>
+            {total > PAGE_SIZE && (
+              <div className="flex items-center gap-2">
+                <button
+                  disabled={skip === 0}
+                  onClick={() =>
+                    load(search, categoryFilter, Math.max(0, skip - PAGE_SIZE))
+                  }
+                  className="rounded-[4px] border-2 border-[var(--line)] bg-[var(--card)] px-2 py-0.5 text-xs font-black text-[var(--text)] disabled:opacity-40"
+                >
+                  ‹
+                </button>
+                <span className="text-xs font-bold text-[var(--muted)]">
+                  {Math.floor(skip / PAGE_SIZE) + 1} /{" "}
+                  {Math.ceil(total / PAGE_SIZE)}
+                </span>
+                <button
+                  disabled={skip + PAGE_SIZE >= total}
+                  onClick={() =>
+                    load(search, categoryFilter, skip + PAGE_SIZE)
+                  }
+                  className="rounded-[4px] border-2 border-[var(--line)] bg-[var(--card)] px-2 py-0.5 text-xs font-black text-[var(--text)] disabled:opacity-40"
+                >
+                  ›
+                </button>
+              </div>
+            )}
+          </div>
         </div>
       )}
 
-      {/* Add / Edit modal — one form, two jobs */}
+      {/* Add / Edit modal */}
       {modal !== "closed" && (
         <Modal
           title={modal === "add" ? "Add product" : "Edit product"}
           onClose={() => setModal("closed")}
         >
-          <form onSubmit={handleSubmit} className="space-y-3">
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm text-slate-600 mb-1">SKU</label>
-                <input
+          <form onSubmit={handleSubmit} className="space-y-4">
+            <div className="grid grid-cols-2 gap-4">
+              <Field label="SKU">
+                <Input
                   required
                   value={form.sku}
                   onChange={(e) => setField("sku", e.target.value)}
-                  className={inputClass}
                 />
-              </div>
-              <div>
-                <label className="block text-sm text-slate-600 mb-1">Unit</label>
-                <input
+              </Field>
+              <Field label="Unit">
+                <Input
                   required
                   value={form.unit}
                   onChange={(e) => setField("unit", e.target.value)}
-                  className={inputClass}
                 />
-              </div>
+              </Field>
             </div>
-            <div>
-              <label className="block text-sm text-slate-600 mb-1">Name</label>
-              <input
+            <Field label="Name">
+              <Input
                 required
                 value={form.name}
                 onChange={(e) => setField("name", e.target.value)}
-                className={inputClass}
               />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-600 mb-1">
-                Description (optional)
-              </label>
-              <input
+            </Field>
+            <Field label="Description" hint="optional">
+              <Input
                 value={form.description}
                 onChange={(e) => setField("description", e.target.value)}
-                className={inputClass}
               />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-600 mb-1">
-                Category (optional)
-              </label>
-              <select
+            </Field>
+            <Field label="Category" hint="optional">
+              <Select
                 value={form.categoryId}
                 onChange={(e) => setField("categoryId", e.target.value)}
-                className={inputClass}
               >
                 <option value="">— none —</option>
                 {categories.map((c) => (
@@ -382,38 +470,31 @@ export function ProductsPage() {
                     {c.name}
                   </option>
                 ))}
-              </select>
-            </div>
-            <div className="grid grid-cols-3 gap-3">
-              <div>
-                <label className="block text-sm text-slate-600 mb-1">Cost</label>
-                <input
+              </Select>
+            </Field>
+            <div className="grid grid-cols-3 gap-4">
+              <Field label="Cost">
+                <Input
                   type="number"
                   min="0"
                   step="0.01"
                   required
                   value={form.costPrice}
                   onChange={(e) => setField("costPrice", e.target.value)}
-                  className={inputClass}
                 />
-              </div>
-              <div>
-                <label className="block text-sm text-slate-600 mb-1">Price</label>
-                <input
+              </Field>
+              <Field label="Price">
+                <Input
                   type="number"
                   min="0"
                   step="0.01"
                   required
                   value={form.sellingPrice}
                   onChange={(e) => setField("sellingPrice", e.target.value)}
-                  className={inputClass}
                 />
-              </div>
-              <div>
-                <label className="block text-sm text-slate-600 mb-1">
-                  Alert below
-                </label>
-                <input
+              </Field>
+              <Field label="Alert below">
+                <Input
                   type="number"
                   min="0"
                   step="1"
@@ -422,32 +503,23 @@ export function ProductsPage() {
                   onChange={(e) =>
                     setField("lowStockThreshold", e.target.value)
                   }
-                  className={inputClass}
                 />
-              </div>
+              </Field>
             </div>
 
-            {formError && (
-              <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
-                {formError}
-              </p>
-            )}
+            {formError && <ErrorAlert>{formError}</ErrorAlert>}
 
-            <div className="flex justify-end gap-2 pt-2">
-              <button
+            <div className="flex justify-end gap-3 pt-1">
+              <Button
                 type="button"
+                variant="secondary"
                 onClick={() => setModal("closed")}
-                className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
               >
                 Cancel
-              </button>
-              <button
-                type="submit"
-                disabled={busy}
-                className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700 disabled:opacity-50"
-              >
+              </Button>
+              <Button type="submit" disabled={busy}>
                 {busy ? "Saving…" : "Save"}
-              </button>
+              </Button>
             </div>
           </form>
         </Modal>
@@ -456,42 +528,43 @@ export function ProductsPage() {
       {/* Manage categories modal */}
       {catModalOpen && (
         <Modal title="Categories" onClose={() => setCatModalOpen(false)}>
-          <form onSubmit={addCategory} className="flex gap-2">
-            <input
+          <form onSubmit={addCategory} className="flex gap-3">
+            <Input
               required
               minLength={2}
               value={newCatName}
               onChange={(e) => setNewCatName(e.target.value)}
               placeholder="New category name…"
-              className={inputClass}
             />
-            <button className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700 whitespace-nowrap">
+            <Button type="submit" className="whitespace-nowrap">
               Add
-            </button>
+            </Button>
           </form>
           {catError && (
-            <p className="mt-2 text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
-              {catError}
-            </p>
+            <div className="mt-3">
+              <ErrorAlert>{catError}</ErrorAlert>
+            </div>
           )}
-          <div className="mt-4 divide-y divide-slate-100">
+          <div className="mt-4 divide-y-2 divide-[var(--line)]/20">
             {categories.length === 0 && (
-              <p className="text-sm text-slate-400">No categories yet.</p>
+              <p className="text-sm font-semibold text-[var(--muted)]">
+                No categories yet.
+              </p>
             )}
             {categories.map((c) => (
               <div
                 key={c.id}
-                className="py-2 flex items-center justify-between"
+                className="flex items-center justify-between py-2.5"
               >
-                <span className="text-sm text-slate-800">
+                <span className="text-sm font-bold text-[var(--text)]">
                   {c.name}
-                  <span className="ml-2 text-xs text-slate-400">
+                  <span className="ml-2 text-xs font-semibold text-[var(--muted)]">
                     {c.productCount} product{c.productCount === 1 ? "" : "s"}
                   </span>
                 </span>
                 <button
                   onClick={() => deleteCategory(c)}
-                  className="text-xs text-slate-400 hover:text-red-600"
+                  className="text-xs font-bold text-[var(--muted)]/60 hover:text-red-500"
                 >
                   Delete
                 </button>

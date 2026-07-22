@@ -1,12 +1,19 @@
 /**
- * Reports page — valuation (now) + movement summary (date range),
- * each with a CSV download for Excel/accountants.
+ * Reports page — neubrutalist edition. Logic unchanged (including the
+ * timezone-safe range conversion); presentation on tokens.
  */
 import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError } from "../lib/api";
 import { downloadCsv } from "../lib/csv";
 import { formatMoney } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
+import {
+  Button,
+  Input,
+  ErrorAlert,
+  cardClass,
+  SectionTitle,
+} from "../components/ui";
 
 type ValuationRow = {
   productId: string;
@@ -24,7 +31,6 @@ type Valuation = {
 };
 type SummaryRow = { type: string; movements: number; netQuantity: number };
 
-// default range: the current month so far
 function firstOfMonth() {
   const d = new Date();
   return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-01`;
@@ -33,15 +39,17 @@ function today() {
   return new Date().toISOString().slice(0, 10);
 }
 
+const th =
+  "px-4 py-3 text-left text-xs font-black uppercase tracking-wide text-[var(--muted)]";
+const td = "px-4 py-3 text-sm";
+
 export function ReportsPage() {
   const { company } = useAuth();
   const currency = company?.currency;
 
-  // --- valuation ---
   const [valuation, setValuation] = useState<Valuation | null>(null);
   const [valError, setValError] = useState<string | null>(null);
 
-  // --- summary ---
   const [from, setFrom] = useState(firstOfMonth());
   const [to, setTo] = useState(today());
   const [summary, setSummary] = useState<SummaryRow[] | null>(null);
@@ -59,10 +67,7 @@ export function ReportsPage() {
   async function loadSummary(f: string, t: string) {
     setSumError(null);
     try {
-      // TIMEZONE RULE: only the browser knows the user's timezone.
-      // new Date("2026-07-09T00:00:00") = midnight IN LOCAL TIME;
-      // toISOString() converts that instant to universal (UTC) form
-      // the server can use without guessing.
+      // only the browser knows the user's timezone — convert here
       const fromIso = new Date(`${f}T00:00:00`).toISOString();
       const toIso = new Date(`${t}T23:59:59.999`).toISOString();
       setSummary(
@@ -105,89 +110,79 @@ export function ReportsPage() {
     );
   }
 
-  const inputClass =
-    "rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400";
-
   return (
-    <div>
-      <h1 className="text-xl font-bold text-slate-800">Reports</h1>
-
+    <div className="max-w-4xl space-y-10">
       {/* ---------- Valuation ---------- */}
-      <div className="mt-6 max-w-3xl">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-600 uppercase tracking-wide">
-            Stock valuation (now)
-          </h2>
-          <button
+      <div className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <SectionTitle>Stock valuation (now)</SectionTitle>
+          <Button
+            variant="secondary"
             onClick={exportValuation}
             disabled={!valuation || valuation.rows.length === 0}
-            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40"
           >
             ⬇ Download CSV
-          </button>
+          </Button>
         </div>
 
-        {valError && (
-          <p className="mt-3 text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
-            {valError}
-          </p>
-        )}
+        {valError && <ErrorAlert>{valError}</ErrorAlert>}
         {valuation && valuation.rows.length === 0 && (
-          <p className="mt-3 text-sm text-slate-400">No stock yet.</p>
+          <div className={`${cardClass} p-6 text-sm font-bold text-[var(--muted)]`}>
+            No stock yet.
+          </div>
         )}
         {valuation && valuation.rows.length > 0 && (
-          <div className="mt-3 bg-white rounded-xl shadow-sm overflow-hidden">
-            <table className="w-full text-sm">
+          <div className={`${cardClass} overflow-x-auto`}>
+            <table className="w-full">
               <thead>
-                <tr className="bg-slate-50 text-left text-slate-500">
-                  <th className="px-4 py-3 font-medium">SKU</th>
-                  <th className="px-4 py-3 font-medium">Product</th>
-                  <th className="px-4 py-3 font-medium text-right">Qty</th>
-                  <th className="px-4 py-3 font-medium text-right">
-                    Cost value
-                  </th>
-                  <th className="px-4 py-3 font-medium text-right">
-                    Retail value
-                  </th>
+                <tr className="border-b-2 border-[var(--line)] bg-[var(--panel)]">
+                  <th className={th}>SKU</th>
+                  <th className={th}>Product</th>
+                  <th className={`${th} text-right`}>Qty</th>
+                  <th className={`${th} text-right`}>Cost value</th>
+                  <th className={`${th} text-right`}>Retail value</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y-2 divide-[var(--line)]/20">
                 {valuation.rows.map((r) => (
-                  <tr key={r.productId} className="border-t border-slate-100">
-                    <td className="px-4 py-3 font-mono text-xs text-slate-500">
+                  <tr key={r.productId} className="hover:bg-[var(--hover)]">
+                    <td className={`${td} font-mono text-xs text-[var(--muted)]`}>
                       {r.sku}
                     </td>
-                    <td className="px-4 py-3 text-slate-800">
+                    <td className={`${td} font-bold text-[var(--text)]`}>
                       {r.name}
                       {!r.isActive && (
-                        <span className="ml-2 text-xs text-slate-400">
+                        <span className="ml-2 text-xs font-semibold text-[var(--muted)]/60">
                           (retired)
                         </span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right text-slate-600">
+                    <td
+                      className={`${td} text-right font-semibold text-[var(--muted)]`}
+                    >
                       {r.quantity} {r.unit}
                     </td>
-                    <td className="px-4 py-3 text-right text-slate-600">
+                    <td
+                      className={`${td} text-right font-semibold text-[var(--muted)]`}
+                    >
                       {formatMoney(r.costValue, currency)}
                     </td>
-                    <td className="px-4 py-3 text-right text-slate-800">
+                    <td className={`${td} text-right font-bold text-[var(--text)]`}>
                       {formatMoney(r.retailValue, currency)}
                     </td>
                   </tr>
                 ))}
-                {/* totals row */}
-                <tr className="border-t-2 border-slate-200 bg-slate-50 font-semibold">
-                  <td className="px-4 py-3" colSpan={2}>
-                    Total
+                <tr className="border-t-2 border-[var(--line)] bg-[var(--panel)]">
+                  <td className={`${td} font-black text-[var(--text)]`} colSpan={2}>
+                    TOTALS
                   </td>
-                  <td className="px-4 py-3 text-right">
+                  <td className={`${td} text-right font-black text-[var(--text)]`}>
                     {valuation.totals.quantity}
                   </td>
-                  <td className="px-4 py-3 text-right">
+                  <td className={`${td} text-right font-black text-[var(--accent)]`}>
                     {formatMoney(valuation.totals.costValue, currency)}
                   </td>
-                  <td className="px-4 py-3 text-right">
+                  <td className={`${td} text-right font-black text-[var(--accent)]`}>
                     {formatMoney(valuation.totals.retailValue, currency)}
                   </td>
                 </tr>
@@ -198,82 +193,75 @@ export function ReportsPage() {
       </div>
 
       {/* ---------- Movement summary ---------- */}
-      <div className="mt-8 max-w-3xl">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-600 uppercase tracking-wide">
-            Movement summary
-          </h2>
-          <button
+      <div className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <SectionTitle>Movement summary</SectionTitle>
+          <Button
+            variant="secondary"
             onClick={exportSummary}
             disabled={!summary || summary.length === 0}
-            className="rounded-lg border border-slate-300 px-3 py-1.5 text-sm text-slate-600 hover:bg-slate-100 disabled:opacity-40"
           >
             ⬇ Download CSV
-          </button>
+          </Button>
         </div>
 
-        <form onSubmit={handleRange} className="mt-3 flex items-center gap-2">
-          <input
+        <form
+          onSubmit={handleRange}
+          className={`${cardClass} flex flex-wrap items-center gap-3 p-4`}
+        >
+          <Input
             type="date"
             value={from}
             onChange={(e) => setFrom(e.target.value)}
-            className={inputClass}
+            className="w-44"
           />
-          <span className="text-slate-400 text-sm">to</span>
-          <input
+          <span className="text-sm font-bold text-[var(--muted)]">to</span>
+          <Input
             type="date"
             value={to}
             onChange={(e) => setTo(e.target.value)}
-            className={inputClass}
+            className="w-44"
           />
-          <button className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-100">
-            Apply
-          </button>
+          <Button type="submit">Apply</Button>
         </form>
 
-        {sumError && (
-          <p className="mt-3 text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
-            {sumError}
-          </p>
-        )}
+        {sumError && <ErrorAlert>{sumError}</ErrorAlert>}
         {summary && summary.length === 0 && (
-          <p className="mt-3 text-sm text-slate-400">
+          <div className={`${cardClass} p-6 text-sm font-bold text-[var(--muted)]`}>
             No movements in this period.
-          </p>
+          </div>
         )}
         {summary && summary.length > 0 && (
-          <div className="mt-3 bg-white rounded-xl shadow-sm overflow-hidden">
-            <table className="w-full text-sm">
+          <div className={`${cardClass} overflow-x-auto`}>
+            <table className="w-full">
               <thead>
-                <tr className="bg-slate-50 text-left text-slate-500">
-                  <th className="px-4 py-3 font-medium">Type</th>
-                  <th className="px-4 py-3 font-medium text-right">
-                    Movements
-                  </th>
-                  <th className="px-4 py-3 font-medium text-right">
-                    Net quantity
-                  </th>
+                <tr className="border-b-2 border-[var(--line)] bg-[var(--panel)]">
+                  <th className={th}>Type</th>
+                  <th className={`${th} text-right`}>Movements</th>
+                  <th className={`${th} text-right`}>Net quantity</th>
                 </tr>
               </thead>
-              <tbody>
+              <tbody className="divide-y-2 divide-[var(--line)]/20">
                 {summary.map((s) => (
-                  <tr key={s.type} className="border-t border-slate-100">
-                    <td className="px-4 py-3 text-slate-800">{s.type}</td>
-                    <td className="px-4 py-3 text-right text-slate-600">
+                  <tr key={s.type} className="hover:bg-[var(--hover)]">
+                    <td className={`${td} font-bold text-[var(--text)]`}>
+                      {s.type}
+                    </td>
+                    <td
+                      className={`${td} text-right font-semibold text-[var(--muted)]`}
+                    >
                       {s.movements}
                     </td>
                     <td
-                      className={`px-4 py-3 text-right font-medium ${
+                      className={`${td} text-right font-black ${
                         s.netQuantity > 0
-                          ? "text-green-700"
+                          ? "text-emerald-500"
                           : s.netQuantity < 0
-                            ? "text-red-600"
-                            : "text-slate-600"
+                            ? "text-red-500"
+                            : "text-[var(--muted)]"
                       }`}
                     >
-                      {s.netQuantity > 0
-                        ? `+${s.netQuantity}`
-                        : s.netQuantity}
+                      {s.netQuantity > 0 ? `+${s.netQuantity}` : s.netQuantity}
                     </td>
                   </tr>
                 ))}

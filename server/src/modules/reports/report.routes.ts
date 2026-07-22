@@ -88,6 +88,53 @@ reportsRouter.get(
   })
 );
 
+/**
+ * GET /api/reports/top-products?from&to&limit
+ * Best sellers for a period: SALE movements grouped per product,
+ * biggest absolute quantity first. Powers the dashboard chart.
+ */
+reportsRouter.get(
+  "/top-products",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const { from, to } = dateRangeSchema.parse(req.query);
+    const companyId = req.user!.companyId;
+
+    const grouped = await prisma.stockMovement.groupBy({
+      by: ["productId"],
+      where: {
+        companyId,
+        type: "SALE",
+        createdAt: { gte: new Date(from), lte: new Date(to) },
+      },
+      _sum: { quantity: true },
+      orderBy: { _sum: { quantity: "asc" } }, // sales are negative: most negative = most sold
+      take: 5,
+    });
+
+    const products = await prisma.product.findMany({
+      where: { id: { in: grouped.map((g) => g.productId) }, companyId },
+      select: { id: true, name: true, sku: true, unit: true },
+    });
+    const byId = new Map(products.map((p) => [p.id, p]));
+
+    res.json(
+      grouped
+        .map((g) => {
+          const p = byId.get(g.productId);
+          if (!p) return null;
+          return {
+            productId: p.id,
+            name: p.name,
+            sku: p.sku,
+            unit: p.unit,
+            unitsSold: Math.abs(g._sum.quantity ?? 0),
+          };
+        })
+        .filter((r) => r !== null)
+    );
+  })
+);
+
 reportsRouter.get(
   "/summary",
   asyncHandler(async (req: AuthRequest, res) => {

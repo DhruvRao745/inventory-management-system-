@@ -5,6 +5,7 @@
  * companyId. Even when fetching by id. Especially when fetching by id —
  * otherwise someone could guess another company's product id and read it.
  */
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error.js";
 import type {
@@ -14,24 +15,35 @@ import type {
 } from "./product.schemas.js";
 
 export async function listProducts(companyId: string, q: ListProductsQuery) {
-  return prisma.product.findMany({
-    where: {
-      companyId, // ← the tenant stamp, always first
-      ...(q.includeInactive ? {} : { isActive: true }),
-      ...(q.categoryId ? { categoryId: q.categoryId } : {}),
-      ...(q.search
-        ? {
-            OR: [
-              // match name OR sku, ignoring letter case
-              { name: { contains: q.search, mode: "insensitive" } },
-              { sku: { contains: q.search, mode: "insensitive" } },
-            ],
-          }
-        : {}),
-    },
-    include: { category: { select: { id: true, name: true } } },
-    orderBy: { name: "asc" },
-  });
+  // typed explicitly: extracted objects lose Prisma's contextual typing
+  const where: Prisma.ProductWhereInput = {
+    companyId, // ← the tenant stamp, always first
+    ...(q.includeInactive ? {} : { isActive: true }),
+    ...(q.categoryId ? { categoryId: q.categoryId } : {}),
+    ...(q.search
+      ? {
+          OR: [
+            // match name OR sku, ignoring letter case
+            { name: { contains: q.search, mode: "insensitive" } },
+            { sku: { contains: q.search, mode: "insensitive" } },
+          ],
+        }
+      : {}),
+  };
+
+  // one page + the total count, fetched together
+  const [items, total] = await Promise.all([
+    prisma.product.findMany({
+      where,
+      include: { category: { select: { id: true, name: true } } },
+      orderBy: { name: "asc" },
+      take: q.take,
+      skip: q.skip,
+    }),
+    prisma.product.count({ where }),
+  ]);
+
+  return { items, total, take: q.take, skip: q.skip };
 }
 
 export async function getProduct(companyId: string, id: string) {

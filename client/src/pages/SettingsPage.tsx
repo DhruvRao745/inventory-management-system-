@@ -1,15 +1,22 @@
 /**
- * Settings — two cards: Locations (ADMIN/MANAGER can edit)
- * and Team (visible to all, editable by ADMIN only).
- *
- * Same rhythms you already know: load on arrival, re-load after
- * changes, modals for forms, server errors shown to humans.
+ * Settings — neubrutalist edition. Three card-sections (Company,
+ * Locations, Team), header actions on the right, logic unchanged.
  */
 import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError } from "../lib/api";
 import type { Location } from "../lib/types";
 import { useAuth } from "../context/AuthContext";
 import { Modal } from "../components/Modal";
+import {
+  Button,
+  Input,
+  Select,
+  Field,
+  ErrorAlert,
+  SuccessAlert,
+  cardClass,
+  SectionTitle,
+} from "../components/ui";
 
 type TeamUser = {
   id: string;
@@ -19,9 +26,6 @@ type TeamUser = {
   isActive: boolean;
   createdAt: string;
 };
-
-const inputClass =
-  "w-full rounded-lg border border-slate-300 px-3 py-2 text-sm focus:outline-none focus:ring-2 focus:ring-slate-400";
 
 const CURRENCIES = ["INR", "USD", "EUR", "GBP", "AED", "SGD"];
 
@@ -45,7 +49,7 @@ export function SettingsPage() {
         method: "PATCH",
         body: { name: coName, currency: coCurrency },
       });
-      await refreshMe(); // sidebar name + money formatting update everywhere
+      await refreshMe();
       setCoOk(true);
     } catch (err) {
       setCoError(err instanceof ApiError ? err.message : "Save failed");
@@ -74,7 +78,7 @@ export function SettingsPage() {
     load();
   }, []);
 
-  // --- location modal (add or edit) ---
+  // --- location modal ---
   const [locModal, setLocModal] = useState<"closed" | "add" | "edit">("closed");
   const [locId, setLocId] = useState<string | null>(null);
   const [locName, setLocName] = useState("");
@@ -113,7 +117,7 @@ export function SettingsPage() {
     }
   }
 
-  // --- team modal (add member) ---
+  // --- team modal ---
   const [userModalOpen, setUserModalOpen] = useState(false);
   const [uName, setUName] = useState("");
   const [uEmail, setUEmail] = useState("");
@@ -169,99 +173,87 @@ export function SettingsPage() {
   }
 
   return (
-    <div>
-      <h1 className="text-xl font-bold text-slate-800">Settings</h1>
-      {error && (
-        <p className="mt-4 text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2 inline-block">
-          {error}
-        </p>
-      )}
+    <div className="max-w-3xl space-y-8">
+      {error && <ErrorAlert>{error}</ErrorAlert>}
 
       {/* ---------- Company ---------- */}
       {isAdmin && (
-        <div className="mt-6 max-w-3xl">
-          <h2 className="text-sm font-semibold text-slate-600 uppercase tracking-wide">
-            Company
-          </h2>
+        <div className="space-y-3">
+          <SectionTitle>Company</SectionTitle>
           <form
             onSubmit={saveCompany}
-            className="mt-3 bg-white rounded-xl shadow-sm p-5 flex items-end gap-3 flex-wrap"
+            className={`${cardClass} flex flex-wrap items-end gap-4 p-5`}
           >
-            <div className="flex-1 min-w-48">
-              <label className="block text-sm text-slate-600 mb-1">
-                Company name
-              </label>
-              <input
-                required
-                minLength={2}
-                value={coName}
-                onChange={(e) => setCoName(e.target.value)}
-                className={inputClass}
-              />
+            <div className="min-w-48 flex-1">
+              <Field label="Company name">
+                <Input
+                  required
+                  minLength={2}
+                  value={coName}
+                  onChange={(e) => setCoName(e.target.value)}
+                />
+              </Field>
             </div>
-            <div>
-              <label className="block text-sm text-slate-600 mb-1">
-                Currency
-              </label>
-              <select
+            <Field label="Currency">
+              <Select
                 value={coCurrency}
                 onChange={(e) => setCoCurrency(e.target.value)}
-                className={inputClass}
               >
                 {CURRENCIES.map((c) => (
                   <option key={c} value={c}>
                     {c}
                   </option>
                 ))}
-              </select>
-            </div>
-            <button className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700">
-              Save
-            </button>
-            {coOk && <span className="text-sm text-green-700">Saved ✓</span>}
+              </Select>
+            </Field>
+            <Button type="submit">Save</Button>
+            {coOk && (
+              <span className="text-sm font-bold text-emerald-500">
+                Saved ✓
+              </span>
+            )}
             {coError && (
-              <span className="text-sm text-red-600">{coError}</span>
+              <span className="text-sm font-bold text-red-500">{coError}</span>
             )}
           </form>
         </div>
       )}
 
       {/* ---------- Locations ---------- */}
-      <div className="mt-6 max-w-3xl">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-600 uppercase tracking-wide">
-            Locations
-          </h2>
+      <div className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <SectionTitle>Locations</SectionTitle>
           {canEditLocations && (
-            <button
-              onClick={openLocAdd}
-              className="rounded-lg bg-slate-900 text-white px-3 py-1.5 text-sm hover:bg-slate-700"
-            >
+            <Button variant="secondary" onClick={openLocAdd}>
               + Add location
-            </button>
+            </Button>
           )}
         </div>
-        <div className="mt-3 bg-white rounded-xl shadow-sm divide-y divide-slate-100">
+        <div className={`${cardClass} divide-y-2 divide-[var(--line)]/20`}>
           {locations.map((l) => (
             <div
               key={l.id}
-              className="px-4 py-3 flex items-center justify-between"
+              className="flex items-center justify-between px-4 py-3"
             >
               <div>
-                <span className="text-sm text-slate-800">{l.name}</span>
+                <span className="text-sm font-bold text-[var(--text)]">
+                  {l.name}
+                </span>
                 {l.isDefault && (
-                  <span className="ml-2 rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
-                    default
+                  <span className="ml-2 rounded-[4px] border-2 border-[var(--line)] bg-[var(--panel)] px-1.5 py-0.5 text-[10px] font-black text-[var(--muted)]">
+                    DEFAULT
                   </span>
                 )}
                 {l.address && (
-                  <div className="text-xs text-slate-400">{l.address}</div>
+                  <div className="text-xs font-semibold text-[var(--muted)]">
+                    {l.address}
+                  </div>
                 )}
               </div>
               {canEditLocations && (
                 <button
                   onClick={() => openLocEdit(l)}
-                  className="text-sm text-slate-500 hover:text-slate-900"
+                  className="text-sm font-bold text-[var(--muted)] hover:text-[var(--accent)]"
                 >
                   Edit
                 </button>
@@ -272,62 +264,63 @@ export function SettingsPage() {
       </div>
 
       {/* ---------- Team ---------- */}
-      <div className="mt-8 max-w-3xl">
-        <div className="flex items-center justify-between">
-          <h2 className="text-sm font-semibold text-slate-600 uppercase tracking-wide">
-            Team
-          </h2>
+      <div className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <SectionTitle>Team</SectionTitle>
           {isAdmin && (
-            <button
-              onClick={openUserAdd}
-              className="rounded-lg bg-slate-900 text-white px-3 py-1.5 text-sm hover:bg-slate-700"
-            >
+            <Button variant="secondary" onClick={openUserAdd}>
               + Add member
-            </button>
+            </Button>
           )}
         </div>
-        <div className="mt-3 bg-white rounded-xl shadow-sm divide-y divide-slate-100">
+        <div className={`${cardClass} divide-y-2 divide-[var(--line)]/20`}>
           {team.map((u) => (
             <div
               key={u.id}
-              className={`px-4 py-3 flex items-center justify-between ${
+              className={`flex items-center justify-between gap-3 px-4 py-3 ${
                 u.isActive ? "" : "opacity-50"
               }`}
             >
-              <div>
-                <span className="text-sm text-slate-800">{u.name}</span>
+              <div className="min-w-0">
+                <span className="text-sm font-bold text-[var(--text)]">
+                  {u.name}
+                </span>
                 {u.id === me?.id && (
-                  <span className="ml-2 text-xs text-slate-400">(you)</span>
+                  <span className="ml-2 text-xs font-semibold text-[var(--muted)]/60">
+                    (you)
+                  </span>
                 )}
-                <div className="text-xs text-slate-400">{u.email}</div>
+                <div className="truncate text-xs font-semibold text-[var(--muted)]">
+                  {u.email}
+                </div>
               </div>
-              <div className="flex items-center gap-3">
+              <div className="flex shrink-0 items-center gap-3">
                 {isAdmin && u.id !== me?.id ? (
                   <>
-                    <select
+                    <Select
                       value={u.role}
                       onChange={(e) =>
                         changeRole(u, e.target.value as TeamUser["role"])
                       }
-                      className="rounded-lg border border-slate-300 px-2 py-1 text-xs"
+                      className="w-32 !py-1 text-xs"
                     >
                       <option value="ADMIN">ADMIN</option>
                       <option value="MANAGER">MANAGER</option>
                       <option value="STAFF">STAFF</option>
-                    </select>
+                    </Select>
                     <button
                       onClick={() => toggleActive(u)}
-                      className={`text-xs ${
+                      className={`text-xs font-bold ${
                         u.isActive
-                          ? "text-slate-400 hover:text-red-600"
-                          : "text-slate-400 hover:text-green-700"
+                          ? "text-[var(--muted)]/60 hover:text-red-500"
+                          : "text-[var(--muted)]/60 hover:text-emerald-500"
                       }`}
                     >
                       {u.isActive ? "Deactivate" : "Reactivate"}
                     </button>
                   </>
                 ) : (
-                  <span className="rounded bg-slate-100 px-2 py-0.5 text-xs text-slate-500">
+                  <span className="rounded-[4px] border-2 border-[var(--line)] bg-[var(--accent)] px-1.5 py-0.5 text-[10px] font-black text-white">
                     {u.role}
                   </span>
                 )}
@@ -343,45 +336,31 @@ export function SettingsPage() {
           title={locModal === "add" ? "Add location" : "Edit location"}
           onClose={() => setLocModal("closed")}
         >
-          <form onSubmit={submitLocation} className="space-y-3">
-            <div>
-              <label className="block text-sm text-slate-600 mb-1">Name</label>
-              <input
+          <form onSubmit={submitLocation} className="space-y-4">
+            <Field label="Name">
+              <Input
                 required
+                minLength={2}
                 value={locName}
                 onChange={(e) => setLocName(e.target.value)}
-                className={inputClass}
               />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-600 mb-1">
-                Address (optional)
-              </label>
-              <input
+            </Field>
+            <Field label="Address" hint="optional">
+              <Input
                 value={locAddress}
                 onChange={(e) => setLocAddress(e.target.value)}
-                className={inputClass}
               />
-            </div>
-            {locError && (
-              <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
-                {locError}
-              </p>
-            )}
-            <div className="flex justify-end gap-2 pt-2">
-              <button
+            </Field>
+            {locError && <ErrorAlert>{locError}</ErrorAlert>}
+            <div className="flex justify-end gap-3 pt-1">
+              <Button
                 type="button"
+                variant="secondary"
                 onClick={() => setLocModal("closed")}
-                className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
               >
                 Cancel
-              </button>
-              <button
-                type="submit"
-                className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700"
-              >
-                Save
-              </button>
+              </Button>
+              <Button type="submit">Save</Button>
             </div>
           </form>
         </Modal>
@@ -389,75 +368,56 @@ export function SettingsPage() {
 
       {userModalOpen && (
         <Modal title="Add team member" onClose={() => setUserModalOpen(false)}>
-          <form onSubmit={submitUser} className="space-y-3">
-            <div>
-              <label className="block text-sm text-slate-600 mb-1">Name</label>
-              <input
+          <form onSubmit={submitUser} className="space-y-4">
+            <Field label="Name">
+              <Input
                 required
                 value={uName}
                 onChange={(e) => setUName(e.target.value)}
-                className={inputClass}
               />
-            </div>
-            <div>
-              <label className="block text-sm text-slate-600 mb-1">Email</label>
-              <input
+            </Field>
+            <Field label="Email">
+              <Input
                 type="email"
                 required
                 value={uEmail}
                 onChange={(e) => setUEmail(e.target.value)}
-                className={inputClass}
               />
-            </div>
-            <div className="grid grid-cols-2 gap-3">
-              <div>
-                <label className="block text-sm text-slate-600 mb-1">
-                  Temporary password
-                </label>
-                <input
+            </Field>
+            <div className="grid grid-cols-2 gap-4">
+              <Field label="Temporary password">
+                <Input
                   required
                   minLength={8}
                   value={uPassword}
                   onChange={(e) => setUPassword(e.target.value)}
-                  className={inputClass}
                 />
-              </div>
-              <div>
-                <label className="block text-sm text-slate-600 mb-1">Role</label>
-                <select
+              </Field>
+              <Field label="Role">
+                <Select
                   value={uRole}
                   onChange={(e) => setURole(e.target.value as TeamUser["role"])}
-                  className={inputClass}
                 >
                   <option value="STAFF">STAFF</option>
                   <option value="MANAGER">MANAGER</option>
                   <option value="ADMIN">ADMIN</option>
-                </select>
-              </div>
+                </Select>
+              </Field>
             </div>
-            <p className="text-xs text-slate-400">
+            <p className="text-xs font-semibold text-[var(--muted)]">
               Share the temporary password with them privately — they log in
               with it at the same address.
             </p>
-            {uError && (
-              <p className="text-sm text-red-600 bg-red-50 rounded-lg px-3 py-2">
-                {uError}
-              </p>
-            )}
-            <div className="flex justify-end gap-2 pt-2">
-              <button
+            {uError && <ErrorAlert>{uError}</ErrorAlert>}
+            <div className="flex justify-end gap-3 pt-1">
+              <Button
                 type="button"
+                variant="secondary"
                 onClick={() => setUserModalOpen(false)}
-                className="rounded-lg border border-slate-300 px-4 py-2 text-sm text-slate-600 hover:bg-slate-50"
               >
                 Cancel
-              </button>
-              <button
-                type="submit"
-                className="rounded-lg bg-slate-900 text-white px-4 py-2 text-sm font-medium hover:bg-slate-700"
-              >
-                Add member
-              </button>
+              </Button>
+              <Button type="submit">Add member</Button>
             </div>
           </form>
         </Modal>

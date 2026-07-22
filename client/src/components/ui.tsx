@@ -20,19 +20,21 @@ import type {
 /* ---------- Button ---------- */
 type ButtonVariant = "primary" | "secondary" | "danger" | "ghost";
 
+// NOTE: base sets NO text color — each variant owns its own.
+// (Two text-color utilities on one element = stylesheet-order roulette.)
 const base = `inline-flex items-center justify-center gap-2 rounded-[5px]
-  border-2 border-[#323232] text-sm font-semibold text-[#323232]
-  shadow-[4px_4px_0px_#323232] transition-all duration-100
+  border-2 border-[var(--line)] text-sm font-semibold
+  shadow-[4px_4px_0px_var(--shadow)] transition-all duration-100
   active:translate-x-[3px] active:translate-y-[3px] active:shadow-none
   disabled:opacity-50 disabled:pointer-events-none`;
 
 const buttonVariants: Record<ButtonVariant, string> = {
-  primary: `${base} bg-[#2d8cf0] text-white`,
-  secondary: `${base} bg-white`,
-  danger: `${base} bg-white text-red-600`,
+  primary: `${base} bg-[var(--btn)] text-[var(--btn-text)] hover:brightness-90`,
+  secondary: `${base} bg-[var(--card)] text-[var(--text)]`,
+  danger: `${base} bg-[var(--card)] text-red-600`,
   // ghost breaks the pattern on purpose: quiet actions stay quiet
   ghost: `inline-flex items-center justify-center gap-2 rounded-[5px] px-3 py-1.5
-    text-sm font-semibold text-[#666] hover:text-[#323232] hover:bg-black/5
+    text-sm font-semibold text-[var(--muted)] hover:text-[var(--text)] hover:bg-[var(--hover)]
     transition-colors`,
 };
 
@@ -51,11 +53,11 @@ export function Button({
 }
 
 /* ---------- Inputs ---------- */
-const fieldClass = `w-full rounded-[5px] border-2 border-[#323232] bg-white
-  px-3 py-2 text-sm font-semibold text-[#323232]
-  shadow-[4px_4px_0px_#323232] outline-none
-  placeholder:text-[#666] placeholder:opacity-80 placeholder:font-medium
-  focus:border-[#2d8cf0] transition-colors duration-100`;
+const fieldClass = `w-full rounded-[5px] border-2 border-[var(--line)] bg-[var(--card)]
+  px-3 py-2 text-sm font-semibold text-[var(--text)]
+  shadow-[4px_4px_0px_var(--shadow)] outline-none
+  placeholder:text-[var(--muted)] placeholder:opacity-80 placeholder:font-medium
+  focus:border-[var(--accent)] transition-colors duration-100`;
 
 export function Input({
   className = "",
@@ -83,10 +85,10 @@ export function Field({
 }) {
   return (
     <div>
-      <label className="mb-1.5 flex items-baseline justify-between text-sm font-bold text-[#323232]">
+      <label className="mb-1.5 flex items-baseline justify-between text-sm font-bold text-[var(--text)]">
         {label}
         {hint && (
-          <span className="text-xs font-medium text-[#666]">{hint}</span>
+          <span className="text-xs font-medium text-[var(--muted)]">{hint}</span>
         )}
       </label>
       {children}
@@ -121,10 +123,22 @@ export function Card({
 }) {
   return (
     <div
-      className={`rounded-[5px] border-2 border-[#323232] bg-[#d3d3d3] p-5 shadow-[4px_4px_0px_#323232] ${className}`}
+      className={`rounded-[5px] border-2 border-[var(--line)] bg-[var(--card-2)] p-5 shadow-[4px_4px_0px_var(--shadow)] ${className}`}
     >
       {children}
     </div>
+  );
+}
+
+/* ---------- Shared card + section title ---------- */
+export const cardClass =
+  "rounded-[5px] border-2 border-[var(--line)] bg-[var(--card)] shadow-[4px_4px_0px_var(--shadow)]";
+
+export function SectionTitle({ children }: { children: ReactNode }) {
+  return (
+    <h2 className="text-xs font-black uppercase tracking-[0.15em] text-[var(--muted)]/80">
+      {children}
+    </h2>
   );
 }
 
@@ -132,7 +146,7 @@ export function Card({
 export function Logo({ size = 36 }: { size?: number }) {
   return (
     <div
-      className="flex items-center justify-center rounded-[5px] border-2 border-[#323232] bg-[#2d8cf0] text-white shadow-[4px_4px_0px_#323232]"
+      className="flex items-center justify-center rounded-[5px] border-2 border-[var(--line)] bg-[var(--accent)] text-[var(--btn-text)] shadow-[4px_4px_0px_var(--shadow)]"
       style={{ width: size, height: size }}
     >
       <svg
