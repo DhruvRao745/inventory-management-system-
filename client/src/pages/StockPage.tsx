@@ -7,6 +7,8 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError } from "../lib/api";
 import type { Product, Location, StockMovement } from "../lib/types";
 import { Modal } from "../components/Modal";
+import { ProductPicker } from "../components/ProductPicker";
+import { PoRefLink } from "../components/PoRefLink";
 import { downloadCsv } from "../lib/csv";
 import { TYPE_COLORS } from "../lib/colors";
 import {
@@ -26,6 +28,17 @@ const MOVEMENT_TYPES = [
   { value: "RETURN_IN", label: "Customer return (in)" },
   { value: "RETURN_OUT", label: "Return to supplier (out)" },
   { value: "ADJUSTMENT", label: "Adjustment (+/−)" },
+] as const;
+
+// The history diary CAN also show transfer rows, so filtering offers all 7.
+const FILTER_TYPES = [
+  { value: "PURCHASE", label: "Purchase" },
+  { value: "SALE", label: "Sale" },
+  { value: "RETURN_IN", label: "Customer return" },
+  { value: "RETURN_OUT", label: "Return to supplier" },
+  { value: "ADJUSTMENT", label: "Adjustment" },
+  { value: "TRANSFER_IN", label: "Transfer in" },
+  { value: "TRANSFER_OUT", label: "Transfer out" },
 ] as const;
 
 type MovementsResponse = {
@@ -67,11 +80,45 @@ export function StockPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  async function loadHistory() {
+  // --- History filters (product, location, type, date range) ---
+  const [fProductId, setFProductId] = useState("");
+  const [fLocationId, setFLocationId] = useState("");
+  const [fType, setFType] = useState("");
+  const [fFrom, setFFrom] = useState("");
+  const [fTo, setFTo] = useState("");
+
+  type HistoryFilters = {
+    productId: string;
+    locationId: string;
+    type: string;
+    from: string;
+    to: string;
+  };
+
+  // Explicit filters can be passed (e.g. on Clear, where state hasn't settled
+  // yet); otherwise we read the current filter state.
+  async function loadHistory(filters?: HistoryFilters) {
+    const f: HistoryFilters = filters ?? {
+      productId: fProductId,
+      locationId: fLocationId,
+      type: fType,
+      from: fFrom,
+      to: fTo,
+    };
     setLoading(true);
     setError(null);
     try {
-      const data = await api<MovementsResponse>("/stock/movements");
+      const params = new URLSearchParams();
+      if (f.productId) params.set("productId", f.productId);
+      if (f.locationId) params.set("locationId", f.locationId);
+      if (f.type) params.set("type", f.type);
+      // The browser owns the timezone — turn local dates into ISO instants.
+      if (f.from) params.set("from", new Date(`${f.from}T00:00:00`).toISOString());
+      if (f.to) params.set("to", new Date(`${f.to}T23:59:59.999`).toISOString());
+      const qs = params.toString();
+      const data = await api<MovementsResponse>(
+        `/stock/movements${qs ? `?${qs}` : ""}`
+      );
       setMovements(data.items);
       setTotal(data.total);
     } catch (err) {
@@ -80,6 +127,23 @@ export function StockPage() {
       setLoading(false);
     }
   }
+
+  function applyFilters(e: FormEvent) {
+    e.preventDefault();
+    loadHistory();
+  }
+
+  function clearFilters() {
+    setFProductId("");
+    setFLocationId("");
+    setFType("");
+    setFFrom("");
+    setFTo("");
+    loadHistory({ productId: "", locationId: "", type: "", from: "", to: "" });
+  }
+
+  const hasActiveFilter =
+    !!fProductId || !!fLocationId || !!fType || !!fFrom || !!fTo;
 
   useEffect(() => {
     Promise.all([
@@ -176,16 +240,11 @@ export function StockPage() {
           <form onSubmit={submitMovement} className="mt-4 space-y-4">
             <div className="grid grid-cols-2 gap-4">
               <Field label="Product">
-                <Select
+                <ProductPicker
+                  products={products}
                   value={productId}
-                  onChange={(e) => setProductId(e.target.value)}
-                >
-                  {products.map((p) => (
-                    <option key={p.id} value={p.id}>
-                      {p.name} ({p.sku})
-                    </option>
-                  ))}
-                </Select>
+                  onChange={setProductId}
+                />
               </Field>
               <Field label="Location">
                 <Select
@@ -329,6 +388,74 @@ export function StockPage() {
           </Button>
         </div>
 
+        {/* Filter bar */}
+        <form
+          onSubmit={applyFilters}
+          className={`${cardClass} grid grid-cols-2 gap-3 p-3 md:grid-cols-6`}
+        >
+          <Field label="Product">
+            <Select
+              value={fProductId}
+              onChange={(e) => setFProductId(e.target.value)}
+            >
+              <option value="">All products</option>
+              {products.map((p) => (
+                <option key={p.id} value={p.id}>
+                  {p.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Location">
+            <Select
+              value={fLocationId}
+              onChange={(e) => setFLocationId(e.target.value)}
+            >
+              <option value="">All locations</option>
+              {locations.map((l) => (
+                <option key={l.id} value={l.id}>
+                  {l.name}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="Type">
+            <Select value={fType} onChange={(e) => setFType(e.target.value)}>
+              <option value="">All types</option>
+              {FILTER_TYPES.map((t) => (
+                <option key={t.value} value={t.value}>
+                  {t.label}
+                </option>
+              ))}
+            </Select>
+          </Field>
+          <Field label="From">
+            <Input
+              type="date"
+              value={fFrom}
+              onChange={(e) => setFFrom(e.target.value)}
+            />
+          </Field>
+          <Field label="To">
+            <Input
+              type="date"
+              value={fTo}
+              onChange={(e) => setFTo(e.target.value)}
+            />
+          </Field>
+          <div className="flex items-end gap-2">
+            <Button type="submit">Apply</Button>
+            <Button
+              type="button"
+              variant="secondary"
+              onClick={clearFilters}
+              disabled={!hasActiveFilter}
+            >
+              Clear
+            </Button>
+          </div>
+        </form>
+
         {loading && (
           <p className="text-sm font-bold text-[var(--muted)]">Loading…</p>
         )}
@@ -336,10 +463,12 @@ export function StockPage() {
         {!loading && !error && movements.length === 0 && (
           <div className={`${cardClass} p-8 text-center`}>
             <div className="text-lg font-black text-[var(--text)]">
-              No movements yet
+              {hasActiveFilter ? "No matching movements" : "No movements yet"}
             </div>
             <p className="mt-1 text-sm font-semibold text-[var(--muted)]">
-              Record your first purchase above — the diary starts here.
+              {hasActiveFilter
+                ? "Try widening the date range or clearing filters."
+                : "Record your first purchase above — the diary starts here."}
             </p>
           </div>
         )}
@@ -393,7 +522,7 @@ export function StockPage() {
                       {m.createdBy.name}
                     </td>
                     <td className={`${td} font-semibold text-[var(--muted)]/60`}>
-                      {m.reference ?? "—"}
+                      <PoRefLink reference={m.reference} />
                     </td>
                   </tr>
                 ))}
@@ -408,16 +537,11 @@ export function StockPage() {
         <Modal title="Transfer stock" onClose={() => setTransferOpen(false)}>
           <form onSubmit={submitTransfer} className="space-y-4">
             <Field label="Product">
-              <Select
+              <ProductPicker
+                products={products}
                 value={tProductId}
-                onChange={(e) => setTProductId(e.target.value)}
-              >
-                {products.map((p) => (
-                  <option key={p.id} value={p.id}>
-                    {p.name} ({p.sku})
-                  </option>
-                ))}
-              </Select>
+                onChange={setTProductId}
+              />
             </Field>
             <div className="grid grid-cols-2 gap-4">
               <Field label="From">

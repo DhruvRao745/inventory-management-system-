@@ -7,6 +7,7 @@ import { api, ApiError } from "../lib/api";
 import type { Location } from "../lib/types";
 import { useAuth } from "../context/AuthContext";
 import { Modal } from "../components/Modal";
+import { ConfirmModal } from "../components/ConfirmModal";
 import {
   Button,
   Input,
@@ -17,6 +18,14 @@ import {
   cardClass,
   SectionTitle,
 } from "../components/ui";
+
+type ConfirmState = {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  danger?: boolean;
+  action: () => Promise<void>;
+};
 
 type TeamUser = {
   id: string;
@@ -51,6 +60,8 @@ export function SettingsPage() {
       });
       await refreshMe();
       setCoOk(true);
+      // Fade the confirmation on its own so it doesn't linger indefinitely.
+      setTimeout(() => setCoOk(false), 2500);
     } catch (err) {
       setCoError(err instanceof ApiError ? err.message : "Save failed");
     }
@@ -117,6 +128,11 @@ export function SettingsPage() {
     }
   }
 
+  // Inline errors for the quick team actions (role change / (de)activate) —
+  // replaces the old native alert() popups so it matches the app's style.
+  const [teamError, setTeamError] = useState<string | null>(null);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
+
   // --- team modal ---
   const [userModalOpen, setUserModalOpen] = useState(false);
   const [uName, setUName] = useState("");
@@ -150,26 +166,35 @@ export function SettingsPage() {
   }
 
   async function changeRole(u: TeamUser, role: TeamUser["role"]) {
+    setTeamError(null);
     try {
       await api(`/users/${u.id}`, { method: "PATCH", body: { role } });
       await load();
     } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Failed to change role");
+      setTeamError(
+        err instanceof ApiError ? err.message : "Failed to change role"
+      );
     }
   }
 
-  async function toggleActive(u: TeamUser) {
+  function toggleActive(u: TeamUser) {
     const verb = u.isActive ? "Deactivate" : "Reactivate";
-    if (!window.confirm(`${verb} ${u.name}?`)) return;
-    try {
-      await api(`/users/${u.id}`, {
-        method: "PATCH",
-        body: { isActive: !u.isActive },
-      });
-      await load();
-    } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Failed");
-    }
+    setTeamError(null);
+    setConfirm({
+      title: `${verb} ${u.name}?`,
+      message: u.isActive
+        ? "They'll lose access immediately. Their history and records stay intact."
+        : "They'll regain access with their existing role.",
+      confirmLabel: verb,
+      danger: u.isActive,
+      action: async () => {
+        await api(`/users/${u.id}`, {
+          method: "PATCH",
+          body: { isActive: !u.isActive },
+        });
+        await load();
+      },
+    });
   }
 
   return (
@@ -222,7 +247,12 @@ export function SettingsPage() {
       {/* ---------- Locations ---------- */}
       <div className="space-y-3">
         <div className="flex items-baseline justify-between">
-          <SectionTitle>Locations</SectionTitle>
+          <SectionTitle>
+            Locations{" "}
+            <span className="font-bold normal-case tracking-normal text-[var(--muted)]/60">
+              ({locations.length})
+            </span>
+          </SectionTitle>
           {canEditLocations && (
             <Button variant="secondary" onClick={openLocAdd}>
               + Add location
@@ -266,13 +296,19 @@ export function SettingsPage() {
       {/* ---------- Team ---------- */}
       <div className="space-y-3">
         <div className="flex items-baseline justify-between">
-          <SectionTitle>Team</SectionTitle>
+          <SectionTitle>
+            Team{" "}
+            <span className="font-bold normal-case tracking-normal text-[var(--muted)]/60">
+              ({team.length})
+            </span>
+          </SectionTitle>
           {isAdmin && (
             <Button variant="secondary" onClick={openUserAdd}>
               + Add member
             </Button>
           )}
         </div>
+        {teamError && <ErrorAlert>{teamError}</ErrorAlert>}
         <div className={`${cardClass} divide-y-2 divide-[var(--line)]/20`}>
           {team.map((u) => (
             <div
@@ -288,6 +324,11 @@ export function SettingsPage() {
                 {u.id === me?.id && (
                   <span className="ml-2 text-xs font-semibold text-[var(--muted)]/60">
                     (you)
+                  </span>
+                )}
+                {!u.isActive && (
+                  <span className="ml-2 rounded-[4px] border-2 border-[var(--line)] bg-[var(--panel)] px-1.5 py-0.5 text-[10px] font-black tracking-wide text-[var(--muted)]">
+                    INACTIVE
                   </span>
                 )}
                 <div className="truncate text-xs font-semibold text-[var(--muted)]">
@@ -421,6 +462,17 @@ export function SettingsPage() {
             </div>
           </form>
         </Modal>
+      )}
+
+      {confirm && (
+        <ConfirmModal
+          title={confirm.title}
+          message={confirm.message}
+          confirmLabel={confirm.confirmLabel}
+          danger={confirm.danger}
+          onConfirm={confirm.action}
+          onClose={() => setConfirm(null)}
+        />
       )}
     </div>
   );

@@ -20,6 +20,9 @@ import { usersRouter } from "./modules/users/user.routes.js";
 import { categoriesRouter } from "./modules/categories/category.routes.js";
 import { reportsRouter } from "./modules/reports/report.routes.js";
 import { companyRouter } from "./modules/company/company.routes.js";
+import { suppliersRouter } from "./modules/suppliers/supplier.routes.js";
+import { purchaseOrdersRouter } from "./modules/purchase-orders/po.routes.js";
+import { auditRouter } from "./modules/audit/audit.routes.js";
 import { errorHandler } from "./middleware/error.js";
 
 export const app = express();
@@ -60,6 +63,9 @@ app.use("/api/users", usersRouter);
 app.use("/api/categories", categoriesRouter);
 app.use("/api/reports", reportsRouter);
 app.use("/api/company", companyRouter);
+app.use("/api/suppliers", suppliersRouter);
+app.use("/api/purchase-orders", purchaseOrdersRouter);
+app.use("/api/audit", auditRouter);
 
 // --- 404 for unknown API routes (always JSON, never HTML) ---
 app.use("/api", (_req, res) => {

@@ -16,6 +16,8 @@ export type Product = {
   description: string | null;
   categoryId: string | null;
   category: Category | null;
+  preferredSupplierId: string | null;
+  preferredSupplier: { id: string; name: string } | null;
   unit: string;
   costPrice: string;
   sellingPrice: string;
@@ -31,6 +33,66 @@ export type Location = {
   address: string | null;
   isDefault: boolean;
 };
+
+export type Supplier = {
+  id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  notes: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type POStatus =
+  | "DRAFT"
+  | "ORDERED"
+  | "PARTIAL"
+  | "RECEIVED"
+  | "CANCELLED";
+
+// Row shape from the list endpoint (flattened summary).
+export type PurchaseOrderRow = {
+  id: string;
+  number: number;
+  status: POStatus;
+  supplier: { id: string; name: string };
+  notes: string | null;
+  expectedDate: string | null;
+  createdAt: string;
+  itemCount: number;
+  totalCost: number;
+};
+
+// unitCost arrives as a STRING (Decimal) — Number() only for display/math.
+export type PurchaseOrderLine = {
+  id: string;
+  productId: string;
+  quantity: number;
+  receivedQty: number;
+  unitCost: string;
+  product: { id: string; sku: string; name: string; unit: string };
+};
+
+export type PurchaseOrder = {
+  id: string;
+  number: number;
+  status: POStatus;
+  notes: string | null;
+  expectedDate: string | null;
+  createdAt: string;
+  updatedAt: string;
+  supplier: { id: string; name: string };
+  createdBy: { id: string; name: string };
+  lines: PurchaseOrderLine[];
+};
+
+// Display helper: 7 → "PO-0007"
+export function poNumber(n: number): string {
+  return `PO-${String(n).padStart(4, "0")}`;
+}
 
 export type MovementType =
   | "PURCHASE"

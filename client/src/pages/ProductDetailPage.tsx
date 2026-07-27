@@ -8,6 +8,7 @@ import type { Product, StockLevel, StockMovement } from "../lib/types";
 import { formatMoney } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { ErrorAlert, cardClass, SectionTitle } from "../components/ui";
+import { PoRefLink } from "../components/PoRefLink";
 import { TYPE_COLORS } from "../lib/colors";
 
 type MovementsResponse = { items: StockMovement[]; total: number };
@@ -64,6 +65,14 @@ export function ProductDetailPage() {
 
   const totalUnits = levels.reduce((sum, l) => sum + l.quantity, 0);
 
+  // Gross margin: profit per unit, and that profit as a % of the selling
+  // price. Guard against a zero selling price (no meaningful %).
+  const cost = Number(product.costPrice);
+  const selling = Number(product.sellingPrice);
+  const marginAmount = selling - cost;
+  const marginPct =
+    selling > 0 ? Math.round((marginAmount / selling) * 100) : null;
+
   return (
     <div className="max-w-3xl space-y-8">
       <Link
@@ -90,10 +99,21 @@ export function ProductDetailPage() {
               {product.category && <span> · {product.category.name}</span>}
               {product.description && <span> · {product.description}</span>}
             </div>
+            {product.preferredSupplier && (
+              <div className="mt-1 text-xs font-bold text-[var(--muted)]">
+                Preferred supplier:{" "}
+                <Link
+                  to={`/suppliers/${product.preferredSupplier.id}`}
+                  className="text-[var(--accent)] hover:underline"
+                >
+                  {product.preferredSupplier.name}
+                </Link>
+              </div>
+            )}
           </div>
           <div className="shrink-0 text-right">
             <div className="text-3xl font-black tracking-tight text-[var(--text)]">
-              {totalUnits}
+              {totalUnits.toLocaleString()}
               <span className="ml-1 text-sm font-semibold text-[var(--muted)]">
                 {product.unit}
               </span>
@@ -104,13 +124,13 @@ export function ProductDetailPage() {
           </div>
         </div>
 
-        <div className="mt-5 grid grid-cols-3 gap-4 border-t-2 border-[var(--line)]/20 pt-4 text-sm">
+        <div className="mt-5 grid grid-cols-2 gap-4 border-t-2 border-[var(--line)]/20 pt-4 text-sm md:grid-cols-4">
           <div>
             <div className="text-xs font-bold text-[var(--muted)]">
               Cost price
             </div>
             <div className="font-black text-[var(--text)]">
-              {formatMoney(Number(product.costPrice), company?.currency)}
+              {formatMoney(cost, company?.currency)}
             </div>
           </div>
           <div>
@@ -118,7 +138,22 @@ export function ProductDetailPage() {
               Selling price
             </div>
             <div className="font-black text-[var(--text)]">
-              {formatMoney(Number(product.sellingPrice), company?.currency)}
+              {formatMoney(selling, company?.currency)}
+            </div>
+          </div>
+          <div>
+            <div className="text-xs font-bold text-[var(--muted)]">Margin</div>
+            <div
+              className={`font-black ${
+                marginAmount >= 0 ? "text-[var(--text)]" : "text-red-500"
+              }`}
+            >
+              {formatMoney(marginAmount, company?.currency)}
+              {marginPct !== null && (
+                <span className="ml-1 text-xs font-bold text-[var(--muted)]">
+                  ({marginPct}%)
+                </span>
+              )}
             </div>
           </div>
           <div>
@@ -126,7 +161,7 @@ export function ProductDetailPage() {
               Alert below
             </div>
             <div className="font-black text-[var(--text)]">
-              {product.lowStockThreshold}
+              {product.lowStockThreshold.toLocaleString()}
             </div>
           </div>
         </div>
@@ -156,7 +191,7 @@ export function ProductDetailPage() {
                       : "bg-[var(--panel)] text-[var(--text)]"
                   }`}
                 >
-                  {l.quantity} {product.unit}
+                  {l.quantity.toLocaleString()} {product.unit}
                   {l.lowStock && " · low!"}
                 </span>
               </div>
@@ -187,6 +222,7 @@ export function ProductDetailPage() {
                   <th className={th}>Type</th>
                   <th className={`${th} text-right`}>Qty</th>
                   <th className={th}>By</th>
+                  <th className={th}>Ref</th>
                 </tr>
               </thead>
               <tbody className="divide-y-2 divide-[var(--line)]/20">
@@ -214,11 +250,18 @@ export function ProductDetailPage() {
                           m.quantity > 0 ? "bg-emerald-500" : "bg-red-500"
                         }`}
                       >
-                        {m.quantity > 0 ? `+${m.quantity}` : m.quantity}
+                        {m.quantity > 0
+                          ? `+${m.quantity.toLocaleString()}`
+                          : m.quantity.toLocaleString()}
                       </span>
                     </td>
                     <td className={`${td} font-semibold text-[var(--muted)]`}>
                       {m.createdBy.name}
+                    </td>
+                    <td
+                      className={`${td} font-mono text-xs text-[var(--muted)]`}
+                    >
+                      <PoRefLink reference={m.reference} />
                     </td>
                   </tr>
                 ))}

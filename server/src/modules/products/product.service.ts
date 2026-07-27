@@ -35,7 +35,10 @@ export async function listProducts(companyId: string, q: ListProductsQuery) {
   const [items, total] = await Promise.all([
     prisma.product.findMany({
       where,
-      include: { category: { select: { id: true, name: true } } },
+      include: {
+      category: { select: { id: true, name: true } },
+      preferredSupplier: { select: { id: true, name: true } },
+    },
       orderBy: { name: "asc" },
       take: q.take,
       skip: q.skip,
@@ -52,7 +55,10 @@ export async function getProduct(companyId: string, id: string) {
   // answer "not found" — we don't even admit it exists.
   const product = await prisma.product.findFirst({
     where: { id, companyId },
-    include: { category: { select: { id: true, name: true } } },
+    include: {
+      category: { select: { id: true, name: true } },
+      preferredSupplier: { select: { id: true, name: true } },
+    },
   });
   if (!product) throw new AppError(404, "Product not found");
   return product;
@@ -82,9 +88,20 @@ export async function createProduct(
     if (!category) throw new AppError(400, "Unknown category");
   }
 
+  const preferredSupplierId = input.preferredSupplierId || null;
+  if (preferredSupplierId) {
+    const supplier = await prisma.supplier.findFirst({
+      where: { id: preferredSupplierId, companyId },
+    });
+    if (!supplier) throw new AppError(400, "Unknown supplier");
+  }
+
   return prisma.product.create({
-    data: { ...input, categoryId, companyId },
-    include: { category: { select: { id: true, name: true } } },
+    data: { ...input, categoryId, preferredSupplierId, companyId },
+    include: {
+      category: { select: { id: true, name: true } },
+      preferredSupplier: { select: { id: true, name: true } },
+    },
   });
 }
 
@@ -115,10 +132,25 @@ export async function updateProduct(
     if (!category) throw new AppError(400, "Unknown category");
   }
 
+  const preferredSupplierId =
+    input.preferredSupplierId === undefined
+      ? undefined
+      : input.preferredSupplierId || null;
+
+  if (preferredSupplierId) {
+    const supplier = await prisma.supplier.findFirst({
+      where: { id: preferredSupplierId, companyId },
+    });
+    if (!supplier) throw new AppError(400, "Unknown supplier");
+  }
+
   return prisma.product.update({
     where: { id },
-    data: { ...input, categoryId },
-    include: { category: { select: { id: true, name: true } } },
+    data: { ...input, categoryId, preferredSupplierId },
+    include: {
+      category: { select: { id: true, name: true } },
+      preferredSupplier: { select: { id: true, name: true } },
+    },
   });
 }
 

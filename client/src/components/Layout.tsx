@@ -71,6 +71,27 @@ const icons = {
       <path d="M1 14h6M9 8h6M17 16h6" />
     </IconBase>
   ),
+  suppliers: (
+    <IconBase>
+      <path d="M1 4h14v11H1z" />
+      <path d="M15 8h4l3 3v4h-7z" />
+      <circle cx="5.5" cy="18" r="1.5" />
+      <circle cx="17.5" cy="18" r="1.5" />
+    </IconBase>
+  ),
+  purchases: (
+    <IconBase>
+      <path d="M6 2h9l4 4v16H6z" />
+      <path d="M15 2v5h5" />
+      <path d="M9 13h6M9 17h6" />
+    </IconBase>
+  ),
+  activity: (
+    <IconBase>
+      <circle cx="12" cy="12" r="9" />
+      <path d="M12 7v5l3 2" />
+    </IconBase>
+  ),
   power: (
     <IconBase>
       <path d="M18.36 6.64a9 9 0 1 1-12.72 0" />
@@ -95,7 +116,10 @@ const navItems = [
   { to: "/", label: "Dashboard", icon: icons.dashboard, color: "#3b82f6", end: true },
   { to: "/products", label: "Products", icon: icons.products, color: "#a855f7" },
   { to: "/stock", label: "Stock", icon: icons.stock, color: "#f59e0b" },
+  { to: "/suppliers", label: "Suppliers", icon: icons.suppliers, color: "#14b8a6" },
+  { to: "/purchase-orders", label: "Purchases", icon: icons.purchases, color: "#6366f1" },
   { to: "/reports", label: "Reports", icon: icons.reports, color: "#10b981" },
+  { to: "/audit", label: "Activity", icon: icons.activity, color: "#64748b" },
   { to: "/settings", label: "Settings", icon: icons.settings, color: "#ec4899" },
 ];
 

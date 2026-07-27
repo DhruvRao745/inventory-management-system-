@@ -28,15 +28,46 @@ type TopProduct = {
   unitsSold: number;
 };
 
-/* month boundaries as timezone-correct ISO instants */
-function monthRange(offset: 0 | -1): [string, string] {
+/* ---------- month helpers ---------- */
+// A month is keyed as "YYYY-MM" — stable, sortable, timezone-agnostic.
+function monthKey(d: Date): string {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}`;
+}
+
+// [startISO, endISO] for a month key. The CURRENT month caps its end at
+// "now" (no point summing the future); past months run to the last instant.
+function monthBounds(key: string): [string, string] {
+  const [y, m] = key.split("-").map(Number);
+  const start = new Date(y, m - 1, 1);
   const now = new Date();
-  const start = new Date(now.getFullYear(), now.getMonth() + offset, 1);
   const end =
-    offset === 0
+    key === monthKey(now)
       ? now
-      : new Date(now.getFullYear(), now.getMonth(), 0, 23, 59, 59, 999);
+      : new Date(y, m, 0, 23, 59, 59, 999); // day 0 of next month = last day
   return [start.toISOString(), end.toISOString()];
+}
+
+// Previous month's key — handles the January→December year rollover.
+function prevMonthKey(key: string): string {
+  const [y, m] = key.split("-").map(Number);
+  return monthKey(new Date(y, m - 2, 1));
+}
+
+// The last N months (newest first) for the picker dropdown.
+function recentMonths(n: number): { key: string; label: string }[] {
+  const now = new Date();
+  return Array.from({ length: n }, (_, i) => {
+    const d = new Date(now.getFullYear(), now.getMonth() - i, 1);
+    return { key: monthKey(d), label: monthLabel(monthKey(d)) };
+  });
+}
+
+function monthLabel(key: string): string {
+  const [y, m] = key.split("-").map(Number);
+  return new Date(y, m - 1, 1).toLocaleDateString(undefined, {
+    month: "long",
+    year: "numeric",
+  });
 }
 
 const q = (from: string, to: string) =>
@@ -50,13 +81,22 @@ export function DashboardPage() {
   const [recent, setRecent] = useState<StockMovement[]>([]);
   const [sumThis, setSumThis] = useState<SummaryRow[]>([]);
   const [sumLast, setSumLast] = useState<SummaryRow[]>([]);
-  const [topProducts, setTopProducts] = useState<TopProduct[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  // --- Period picker (drives the Top sellers + Movements panels only) ---
+  const months = recentMonths(12);
+  const [selectedMonth, setSelectedMonth] = useState(monthKey(new Date()));
+  const [periodSummary, setPeriodSummary] = useState<SummaryRow[]>([]);
+  const [periodTop, setPeriodTop] = useState<TopProduct[]>([]);
+  const [periodLoading, setPeriodLoading] = useState(true);
+
+  // Snapshot + current-month card trends — loaded once. These are always
+  // "now / this month" regardless of the picker below.
   useEffect(() => {
-    const [thisFrom, thisTo] = monthRange(0);
-    const [lastFrom, lastTo] = monthRange(-1);
+    const thisKey = monthKey(new Date());
+    const [thisFrom, thisTo] = monthBounds(thisKey);
+    const [lastFrom, lastTo] = monthBounds(prevMonthKey(thisKey));
     Promise.all([
       api<{ total: number }>("/products?take=1"), // only the count
       api<{ totals: { costValue: number } }>("/reports/valuation"),
@@ -64,22 +104,38 @@ export function DashboardPage() {
       api<MovementsResponse>("/stock/movements?take=8"),
       api<SummaryRow[]>(`/reports/summary?${q(thisFrom, thisTo)}`),
       api<SummaryRow[]>(`/reports/summary?${q(lastFrom, lastTo)}`),
-      api<TopProduct[]>(`/reports/top-products?${q(thisFrom, thisTo)}`),
     ])
-      .then(([prods, valuation, lvls, movs, sThis, sLast, top]) => {
+      .then(([prods, valuation, lvls, movs, sThis, sLast]) => {
         setProductsTotal(prods.total);
         setStockValue(valuation.totals.costValue);
         setLevels(lvls);
         setRecent(movs.items);
         setSumThis(sThis);
         setSumLast(sLast);
-        setTopProducts(top);
       })
       .catch((err) =>
         setError(err instanceof ApiError ? err.message : "Failed to load")
       )
       .finally(() => setLoading(false));
   }, []);
+
+  // Period panels — refetch whenever the user picks a different month.
+  useEffect(() => {
+    const [from, to] = monthBounds(selectedMonth);
+    setPeriodLoading(true);
+    Promise.all([
+      api<SummaryRow[]>(`/reports/summary?${q(from, to)}`),
+      api<TopProduct[]>(`/reports/top-products?${q(from, to)}`),
+    ])
+      .then(([sum, top]) => {
+        setPeriodSummary(sum);
+        setPeriodTop(top);
+      })
+      .catch((err) =>
+        setError(err instanceof ApiError ? err.message : "Failed to load")
+      )
+      .finally(() => setPeriodLoading(false));
+  }, [selectedMonth]);
 
   if (loading)
     return (
@@ -109,8 +165,8 @@ export function DashboardPage() {
   const locEntries = [...byLocation.entries()].filter(([, v]) => v > 0);
   const locTotal = locEntries.reduce((s, [, v]) => s + v, 0);
 
-  const maxSold = Math.max(...topProducts.map((t) => t.unitsSold), 1);
-  const maxTypeCount = Math.max(...sumThis.map((r) => r.movements), 1);
+  const maxSold = Math.max(...periodTop.map((t) => t.unitsSold), 1);
+  const maxTypeCount = Math.max(...periodSummary.map((r) => r.movements), 1);
 
   const trendChip = (text: string, positive: boolean) => (
     <span
@@ -150,7 +206,7 @@ export function DashboardPage() {
             Products
           </div>
           <div className="mt-2 text-3xl font-black tracking-tight">
-            {productsTotal}
+            {productsTotal.toLocaleString()}
           </div>
           <div className="mt-1 text-xs font-semibold text-[var(--muted)]">
             in catalog
@@ -163,13 +219,16 @@ export function DashboardPage() {
             Units in stock
           </div>
           <div className="mt-2 text-3xl font-black tracking-tight">
-            {totalUnits}
+            {totalUnits.toLocaleString()}
           </div>
           <div className="mt-1.5">
             {trendChip(
-              `${netThis >= 0 ? "+" : ""}${netThis} this month`,
+              `${netThis >= 0 ? "+" : ""}${netThis.toLocaleString()} this month`,
               netThis >= 0
             )}
+          </div>
+          <div className="mt-1 text-xs font-semibold text-[var(--muted)]">
+            from {(totalUnits - netThis).toLocaleString()} at month start
           </div>
         </div>
 
@@ -183,13 +242,16 @@ export function DashboardPage() {
           </div>
           <div className="mt-1.5 flex items-center gap-2">
             <span className="text-xs font-semibold text-[var(--muted)]">
-              sold {soldThis} units
+              sold {soldThis.toLocaleString()} units
             </span>
             {soldPct !== null &&
               trendChip(
                 `${soldPct >= 0 ? "↑" : "↓"} ${Math.abs(soldPct)}% vs last month`,
                 soldPct >= 0
               )}
+          </div>
+          <div className="mt-1 text-xs font-semibold text-[var(--muted)]">
+            compared to {soldLast.toLocaleString()} sold last month
           </div>
         </div>
 
@@ -219,18 +281,41 @@ export function DashboardPage() {
         </div>
       </div>
 
+      {/* Period picker — scopes the two analytics panels below (not the donut) */}
+      <div className="flex flex-wrap items-center justify-between gap-3">
+        <SectionTitle>Sales & movements</SectionTitle>
+        <div className="flex items-center gap-2">
+          <span className="text-xs font-bold uppercase tracking-wide text-[var(--muted)]">
+            Month
+          </span>
+          <select
+            value={selectedMonth}
+            onChange={(e) => setSelectedMonth(e.target.value)}
+            className="rounded-[5px] border-2 border-[var(--line)] bg-[var(--card)] px-3 py-1.5 text-sm font-bold text-[var(--text)] shadow-[3px_3px_0px_var(--shadow)] focus:outline-none"
+          >
+            {months.map((m) => (
+              <option key={m.key} value={m.key}>
+                {m.label}
+              </option>
+            ))}
+          </select>
+        </div>
+      </div>
+
       {/* Analytics row */}
       <div className="grid gap-6 lg:grid-cols-3">
         {/* Top sellers */}
         <div className={`${cardClass} p-5`}>
-          <SectionTitle>Top sellers · this month</SectionTitle>
-          {topProducts.length === 0 ? (
+          <SectionTitle>Top sellers</SectionTitle>
+          {periodLoading ? (
+            <p className="mt-4 text-sm font-bold text-[var(--muted)]">Loading…</p>
+          ) : periodTop.length === 0 ? (
             <p className="mt-4 text-sm font-bold text-[var(--muted)]">
-              No sales recorded yet this month.
+              No sales recorded in {monthLabel(selectedMonth)}.
             </p>
           ) : (
             <div className="mt-4 space-y-3">
-              {topProducts.map((t, i) => (
+              {periodTop.map((t, i) => (
                 <Link
                   key={t.productId}
                   to={`/products/${t.productId}`}
@@ -241,10 +326,13 @@ export function DashboardPage() {
                       {t.name}
                     </span>
                     <span className="text-[var(--muted)]">
-                      {t.unitsSold} {t.unit}
+                      {t.unitsSold.toLocaleString()} {t.unit}
                     </span>
                   </div>
-                  <div className="mt-1 h-3 rounded-[3px] border-2 border-[var(--line)] bg-[var(--panel)]">
+                  <div
+                    className="mt-1 h-3 rounded-[3px] border-2 border-[var(--line)] bg-[var(--panel)]"
+                    title={`${t.name}: ${t.unitsSold.toLocaleString()} ${t.unit} sold in ${monthLabel(selectedMonth)}`}
+                  >
                     <div
                       className="h-full"
                       style={{
@@ -261,25 +349,32 @@ export function DashboardPage() {
 
         {/* Movements by type */}
         <div className={`${cardClass} p-5`}>
-          <SectionTitle>Movements · this month</SectionTitle>
-          {sumThis.length === 0 ? (
+          <SectionTitle>Movements</SectionTitle>
+          {periodLoading ? (
+            <p className="mt-4 text-sm font-bold text-[var(--muted)]">Loading…</p>
+          ) : periodSummary.length === 0 ? (
             <p className="mt-4 text-sm font-bold text-[var(--muted)]">
-              Nothing recorded yet this month.
+              Nothing recorded in {monthLabel(selectedMonth)}.
             </p>
           ) : (
             <div className="mt-4 space-y-3">
-              {sumThis.map((r) => (
+              {periodSummary.map((r) => (
                 <div key={r.type}>
                   <div className="flex items-baseline justify-between text-xs font-bold">
                     <span style={{ color: TYPE_COLORS[r.type] ?? "inherit" }}>
                       {r.type}
                     </span>
                     <span className="text-[var(--muted)]">
-                      {r.movements}× ·{" "}
-                      {r.netQuantity > 0 ? `+${r.netQuantity}` : r.netQuantity}
+                      {r.movements.toLocaleString()}× ·{" "}
+                      {r.netQuantity > 0
+                        ? `+${r.netQuantity.toLocaleString()}`
+                        : r.netQuantity.toLocaleString()}
                     </span>
                   </div>
-                  <div className="mt-1 h-3 rounded-[3px] border-2 border-[var(--line)] bg-[var(--panel)]">
+                  <div
+                    className="mt-1 h-3 rounded-[3px] border-2 border-[var(--line)] bg-[var(--panel)]"
+                    title={`${r.type}: ${r.movements.toLocaleString()} movement(s) · net ${r.netQuantity > 0 ? "+" : ""}${r.netQuantity.toLocaleString()}`}
+                  >
                     <div
                       className="h-full"
                       style={{
@@ -296,7 +391,7 @@ export function DashboardPage() {
 
         {/* Stock by location donut */}
         <div className={`${cardClass} p-5`}>
-          <SectionTitle>Stock by location</SectionTitle>
+          <SectionTitle>Stock by location · now</SectionTitle>
           {locEntries.length === 0 ? (
             <p className="mt-4 text-sm font-bold text-[var(--muted)]">
               No stock on hand yet.
@@ -321,7 +416,11 @@ export function DashboardPage() {
                       strokeDasharray={`${dash} ${C - dash}`}
                       strokeDashoffset={offset}
                       transform="rotate(-90 50 50)"
-                    />
+                    >
+                      <title>{`${name}: ${value.toLocaleString()} units · ${Math.round(
+                        frac * 100
+                      )}%`}</title>
+                    </circle>
                   );
                 })}
                 <text
@@ -332,7 +431,7 @@ export function DashboardPage() {
                   fontSize="16"
                   fontWeight="900"
                 >
-                  {locTotal}
+                  {locTotal.toLocaleString()}
                 </text>
                 <text
                   x="50"
@@ -430,8 +529,8 @@ export function DashboardPage() {
                     <div className="truncate text-sm font-bold text-[var(--text)]">
                       {m.product.name}
                       <span
-                        className="ml-2 text-[10px] font-black tracking-wide"
-                        style={{ color: TYPE_COLORS[m.type] ?? "inherit" }}
+                        className="ml-2 inline-block rounded-[4px] border-2 border-[var(--line)] px-1.5 py-0.5 align-middle text-[10px] font-black tracking-wide text-white"
+                        style={{ background: TYPE_COLORS[m.type] ?? "#666" }}
                       >
                         {m.type}
                       </span>
@@ -448,7 +547,9 @@ export function DashboardPage() {
                       m.quantity > 0 ? "bg-emerald-500" : "bg-red-500"
                     }`}
                   >
-                    {m.quantity > 0 ? `+${m.quantity}` : m.quantity}
+                    {m.quantity > 0
+                      ? `+${m.quantity.toLocaleString()}`
+                      : m.quantity.toLocaleString()}
                   </span>
                 </div>
               ))}

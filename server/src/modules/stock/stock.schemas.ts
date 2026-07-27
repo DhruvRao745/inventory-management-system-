@@ -52,6 +52,21 @@ export const transferSchema = z
 export const listMovementsQuerySchema = z.object({
   productId: z.string().optional(),
   locationId: z.string().optional(),
+  // Reading the diary, we CAN filter by transfer rows too (unlike writing).
+  type: z
+    .enum([
+      "PURCHASE",
+      "SALE",
+      "RETURN_IN",
+      "RETURN_OUT",
+      "ADJUSTMENT",
+      "TRANSFER_IN",
+      "TRANSFER_OUT",
+    ])
+    .optional(),
+  // Date window — client sends ISO instants (it knows the user's timezone).
+  from: z.string().datetime({ message: "Use ISO datetime" }).optional(),
+  to: z.string().datetime({ message: "Use ISO datetime" }).optional(),
   // Pagination: don't dump 100,000 diary lines in one response.
   take: z.coerce.number().int().min(1).max(100).default(50),
   skip: z.coerce.number().int().min(0).default(0),

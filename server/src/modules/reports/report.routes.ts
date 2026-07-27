@@ -161,3 +161,143 @@ reportsRouter.get(
     );
   })
 );
+
+/**
+ * GET /api/reports/sales-over-time?from&to&tzOffset
+ *   Units SOLD per day across a date range — powers the sales trend chart.
+ *   "How did my sales move day by day?"
+ *
+ * Timezone note: a "day" needs a timezone to know where midnight falls.
+ * The browser sends `tzOffset` = its Date.getTimezoneOffset() value (minutes
+ * that must be ADDED to local time to reach UTC — e.g. IST is -330). We shift
+ * each movement's instant by that offset before slicing off the date, so a
+ * sale lands on the day the USER made it, not the day it happened in UTC.
+ * (This is the fix for the old UTC-vs-IST report bug.)
+ */
+const salesSeriesSchema = dateRangeSchema.extend({
+  // querystrings are strings — coerce to a number; default 0 = treat as UTC
+  tzOffset: z.coerce.number().int().default(0),
+});
+
+// Shift a UTC instant into the user's local clock, then return its YYYY-MM-DD.
+function localDayKey(instant: Date, tzOffset: number): string {
+  const shifted = new Date(instant.getTime() - tzOffset * 60_000);
+  return shifted.toISOString().slice(0, 10);
+}
+
+reportsRouter.get(
+  "/sales-over-time",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const { from, to, tzOffset } = salesSeriesSchema.parse(req.query);
+    const companyId = req.user!.companyId;
+
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+    if (fromDate > toDate) throw new AppError(400, "'from' is after 'to'");
+
+    // Only the raw sales in the window — pull the two fields we need.
+    const sales = await prisma.stockMovement.findMany({
+      where: {
+        companyId,
+        type: "SALE",
+        createdAt: { gte: fromDate, lte: toDate },
+      },
+      select: { createdAt: true, quantity: true },
+    });
+
+    // Bucket into a map: local-day -> units sold (sales are negative, so flip).
+    const byDay = new Map<string, number>();
+    for (const s of sales) {
+      const key = localDayKey(s.createdAt, tzOffset);
+      byDay.set(key, (byDay.get(key) ?? 0) + Math.abs(s.quantity));
+    }
+
+    // Fill EVERY day in the range (even zero-sale days) so the chart has an
+    // unbroken line instead of jumping over gaps.
+    const series: { date: string; unitsSold: number }[] = [];
+    const cursor = new Date(localDayKey(fromDate, tzOffset) + "T00:00:00.000Z");
+    const lastKey = localDayKey(toDate, tzOffset);
+    while (true) {
+      const key = cursor.toISOString().slice(0, 10);
+      series.push({ date: key, unitsSold: byDay.get(key) ?? 0 });
+      if (key === lastKey) break;
+      cursor.setUTCDate(cursor.getUTCDate() + 1);
+    }
+
+    res.json(series);
+  })
+);
+
+/**
+ * GET /api/reports/purchasing?from&to
+ *   Buying summary over a period: order counts by status, committed spend
+ *   (non-cancelled PO value), value actually received into stock, and a
+ *   spend-by-supplier breakdown. "What am I buying, and from whom?"
+ */
+reportsRouter.get(
+  "/purchasing",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const { from, to } = dateRangeSchema.parse(req.query);
+    const companyId = req.user!.companyId;
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+    if (fromDate > toDate) throw new AppError(400, "'from' is after 'to'");
+
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+
+    const pos = await prisma.purchaseOrder.findMany({
+      where: { companyId, createdAt: { gte: fromDate, lte: toDate } },
+      include: {
+        supplier: { select: { id: true, name: true } },
+        lines: { select: { quantity: true, receivedQty: true, unitCost: true } },
+      },
+    });
+
+    const byStatus: Record<string, number> = {};
+    const bySupplier = new Map<
+      string,
+      { supplierId: string; name: string; orders: number; totalCost: number }
+    >();
+    let committedCost = 0;
+    let receivedValue = 0;
+
+    for (const po of pos) {
+      byStatus[po.status] = (byStatus[po.status] ?? 0) + 1;
+
+      const ordered = po.lines.reduce(
+        (s, l) => s + Number(l.unitCost) * l.quantity,
+        0
+      );
+      const received = po.lines.reduce(
+        (s, l) => s + Number(l.unitCost) * l.receivedQty,
+        0
+      );
+      receivedValue += received;
+      const counts = po.status !== "CANCELLED";
+      if (counts) committedCost += ordered;
+
+      const row =
+        bySupplier.get(po.supplier.id) ?? {
+          supplierId: po.supplier.id,
+          name: po.supplier.name,
+          orders: 0,
+          totalCost: 0,
+        };
+      row.orders += 1;
+      if (counts) row.totalCost += ordered;
+      bySupplier.set(po.supplier.id, row);
+    }
+
+    res.json({
+      totals: {
+        orders: pos.length,
+        committedCost: round2(committedCost),
+        receivedValue: round2(receivedValue),
+      },
+      byStatus,
+      bySupplier: [...bySupplier.values()]
+        .map((s) => ({ ...s, totalCost: round2(s.totalCost) }))
+        .sort((a, b) => b.totalCost - a.totalCost),
+    });
+  })
+);

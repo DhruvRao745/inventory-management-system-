@@ -5,9 +5,10 @@
 import { useEffect, useState, type FormEvent } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import type { Product, StockLevel } from "../lib/types";
+import type { Product, StockLevel, Supplier } from "../lib/types";
 import { useAuth } from "../context/AuthContext";
 import { Modal } from "../components/Modal";
+import { ConfirmModal } from "../components/ConfirmModal";
 import { hashColor } from "../lib/colors";
 import {
   Button,
@@ -18,11 +19,20 @@ import {
   cardClass,
 } from "../components/ui";
 
+type ConfirmState = {
+  title: string;
+  message: string;
+  confirmLabel: string;
+  danger?: boolean;
+  action: () => Promise<void>;
+};
+
 const emptyForm = {
   sku: "",
   name: "",
   description: "",
   categoryId: "",
+  preferredSupplierId: "",
   unit: "pcs",
   costPrice: "0",
   sellingPrice: "0",
@@ -49,6 +59,7 @@ export function ProductsPage() {
   const canWrite = user?.role === "ADMIN" || user?.role === "MANAGER";
 
   const [products, setProducts] = useState<Product[]>([]);
+  const [confirm, setConfirm] = useState<ConfirmState | null>(null);
   const [total, setTotal] = useState(0);
   const [skip, setSkip] = useState(0);
   const [loading, setLoading] = useState(true);
@@ -60,6 +71,7 @@ export function ProductsPage() {
   const [lowIds, setLowIds] = useState<Set<string>>(new Set());
   const [categories, setCategories] = useState<CategoryWithCount[]>([]);
   const [categoryFilter, setCategoryFilter] = useState("");
+  const [suppliers, setSuppliers] = useState<Supplier[]>([]);
 
   const [catModalOpen, setCatModalOpen] = useState(false);
   const [newCatName, setNewCatName] = useState("");
@@ -111,6 +123,7 @@ export function ProductsPage() {
     load();
     loadCategories();
     loadLevels();
+    api<Supplier[]>("/suppliers").then(setSuppliers).catch(() => {});
   }, []);
 
   function handleSearch(e: FormEvent) {
@@ -131,6 +144,7 @@ export function ProductsPage() {
       name: p.name,
       description: p.description ?? "",
       categoryId: p.categoryId ?? "",
+      preferredSupplierId: p.preferredSupplierId ?? "",
       unit: p.unit,
       costPrice: p.costPrice,
       sellingPrice: p.sellingPrice,
@@ -153,6 +167,7 @@ export function ProductsPage() {
       name: form.name,
       description: form.description || undefined,
       categoryId: form.categoryId,
+      preferredSupplierId: form.preferredSupplierId,
       unit: form.unit,
       costPrice: Number(form.costPrice),
       sellingPrice: Number(form.sellingPrice),
@@ -175,16 +190,19 @@ export function ProductsPage() {
     }
   }
 
-  async function handleRetire(p: Product) {
-    if (!window.confirm(`Retire "${p.name}"? It will disappear from lists.`))
-      return;
-    try {
-      await api(`/products/${p.id}`, { method: "DELETE" });
-      await load(search, categoryFilter, skip);
-      await loadLevels();
-    } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Failed to retire");
-    }
+  function handleRetire(p: Product) {
+    setConfirm({
+      title: `Retire "${p.name}"?`,
+      message:
+        "It will disappear from active lists. Its history and stock records stay intact — you can't undo this from here.",
+      confirmLabel: "Retire",
+      danger: true,
+      action: async () => {
+        await api(`/products/${p.id}`, { method: "DELETE" });
+        await load(search, categoryFilter, skip);
+        await loadLevels();
+      },
+    });
   }
 
   async function addCategory(e: FormEvent) {
@@ -199,19 +217,21 @@ export function ProductsPage() {
     }
   }
 
-  async function deleteCategory(c: CategoryWithCount) {
-    const warning =
-      c.productCount > 0
-        ? `Delete "${c.name}"? Its ${c.productCount} product(s) will become uncategorized.`
-        : `Delete "${c.name}"?`;
-    if (!window.confirm(warning)) return;
-    try {
-      await api(`/categories/${c.id}`, { method: "DELETE" });
-      await loadCategories();
-      await load(search, categoryFilter, skip);
-    } catch (err) {
-      alert(err instanceof ApiError ? err.message : "Failed to delete");
-    }
+  function deleteCategory(c: CategoryWithCount) {
+    setConfirm({
+      title: `Delete "${c.name}"?`,
+      message:
+        c.productCount > 0
+          ? `Its ${c.productCount} product(s) will become uncategorized.`
+          : "This category will be removed.",
+      confirmLabel: "Delete",
+      danger: true,
+      action: async () => {
+        await api(`/categories/${c.id}`, { method: "DELETE" });
+        await loadCategories();
+        await load(search, categoryFilter, skip);
+      },
+    });
   }
 
   return (
@@ -472,6 +492,26 @@ export function ProductsPage() {
                 ))}
               </Select>
             </Field>
+            <Field label="Preferred supplier" hint="optional">
+              <Select
+                value={form.preferredSupplierId}
+                onChange={(e) =>
+                  setField("preferredSupplierId", e.target.value)
+                }
+              >
+                <option value="">— none —</option>
+                {suppliers
+                  .filter(
+                    (s) => s.isActive || s.id === form.preferredSupplierId
+                  )
+                  .map((s) => (
+                    <option key={s.id} value={s.id}>
+                      {s.name}
+                      {!s.isActive ? " (inactive)" : ""}
+                    </option>
+                  ))}
+              </Select>
+            </Field>
             <div className="grid grid-cols-3 gap-4">
               <Field label="Cost">
                 <Input
@@ -572,6 +612,17 @@ export function ProductsPage() {
             ))}
           </div>
         </Modal>
+      )}
+
+      {confirm && (
+        <ConfirmModal
+          title={confirm.title}
+          message={confirm.message}
+          confirmLabel={confirm.confirmLabel}
+          danger={confirm.danger}
+          onConfirm={confirm.action}
+          onClose={() => setConfirm(null)}
+        />
       )}
     </div>
   );

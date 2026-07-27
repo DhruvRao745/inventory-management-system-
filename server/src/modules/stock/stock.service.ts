@@ -180,6 +180,16 @@ export async function listMovements(
     companyId,
     ...(q.productId ? { productId: q.productId } : {}),
     ...(q.locationId ? { locationId: q.locationId } : {}),
+    ...(q.type ? { type: q.type } : {}),
+    // Only build the createdAt filter if at least one bound is present.
+    ...(q.from || q.to
+      ? {
+          createdAt: {
+            ...(q.from ? { gte: new Date(q.from) } : {}),
+            ...(q.to ? { lte: new Date(q.to) } : {}),
+          },
+        }
+      : {}),
   };
 
   const [items, total] = await Promise.all([

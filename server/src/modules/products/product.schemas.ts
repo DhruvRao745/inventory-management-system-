@@ -8,6 +8,7 @@ export const createProductSchema = z.object({
   name: z.string().trim().min(2, "Name is too short"),
   description: z.string().trim().optional(),
   categoryId: z.string().optional(),
+  preferredSupplierId: z.string().optional(),
   unit: z.string().trim().min(1).default("pcs"),
   costPrice: z.number().nonnegative("Cost can't be negative").default(0),
   sellingPrice: z.number().nonnegative("Price can't be negative").default(0),
