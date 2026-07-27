@@ -242,6 +242,10 @@ export function PurchaseOrderDetailPage() {
         </Link>
       </div>
     );
+  // We have an id but the PO hasn't arrived yet (e.g. just after creating +
+  // navigating). Show loading instead of crashing on null.
+  if (!isNew && !po)
+    return <p className="text-sm font-bold text-[var(--muted)]">Loading…</p>;
 
   return (
     <div className="max-w-3xl space-y-6">

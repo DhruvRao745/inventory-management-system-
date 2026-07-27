@@ -37,6 +37,7 @@ const emptyForm = {
   costPrice: "0",
   sellingPrice: "0",
   lowStockThreshold: "0",
+  tracksBatch: false,
 };
 type ProductForm = typeof emptyForm;
 
@@ -149,6 +150,7 @@ export function ProductsPage() {
       costPrice: p.costPrice,
       sellingPrice: p.sellingPrice,
       lowStockThreshold: String(p.lowStockThreshold),
+      tracksBatch: p.tracksBatch,
     });
     setFormError(null);
     setModal("edit");
@@ -172,6 +174,7 @@ export function ProductsPage() {
       costPrice: Number(form.costPrice),
       sellingPrice: Number(form.sellingPrice),
       lowStockThreshold: Number(form.lowStockThreshold),
+      tracksBatch: form.tracksBatch,
     };
     try {
       if (modal === "add") {
@@ -546,6 +549,18 @@ export function ProductsPage() {
                 />
               </Field>
             </div>
+
+            <label className="flex cursor-pointer items-center gap-2 text-sm font-bold text-[var(--text)]">
+              <input
+                type="checkbox"
+                checked={form.tracksBatch}
+                onChange={(e) =>
+                  setForm((f) => ({ ...f, tracksBatch: e.target.checked }))
+                }
+                className="h-4 w-4 accent-[var(--accent)]"
+              />
+              Track batch &amp; expiry (for perishables)
+            </label>
 
             {formError && <ErrorAlert>{formError}</ErrorAlert>}
 

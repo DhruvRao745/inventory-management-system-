@@ -17,6 +17,7 @@ export const createProductSchema = z.object({
     .int("Must be a whole number")
     .nonnegative()
     .default(0),
+  tracksBatch: z.boolean().default(false),
 });
 
 // For editing: same fields, but ALL optional — send only what changes.

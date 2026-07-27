@@ -92,6 +92,12 @@ const icons = {
       <path d="M12 7v5l3 2" />
     </IconBase>
   ),
+  invoices: (
+    <IconBase>
+      <path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2z" />
+      <path d="M9 8h6M9 12h4" />
+    </IconBase>
+  ),
   power: (
     <IconBase>
       <path d="M18.36 6.64a9 9 0 1 1-12.72 0" />
@@ -118,6 +124,7 @@ const navItems = [
   { to: "/stock", label: "Stock", icon: icons.stock, color: "#f59e0b" },
   { to: "/suppliers", label: "Suppliers", icon: icons.suppliers, color: "#14b8a6" },
   { to: "/purchase-orders", label: "Purchases", icon: icons.purchases, color: "#6366f1" },
+  { to: "/invoices", label: "Invoices", icon: icons.invoices, color: "#eab308" },
   { to: "/reports", label: "Reports", icon: icons.reports, color: "#10b981" },
   { to: "/audit", label: "Activity", icon: icons.activity, color: "#64748b" },
   { to: "/settings", label: "Settings", icon: icons.settings, color: "#ec4899" },

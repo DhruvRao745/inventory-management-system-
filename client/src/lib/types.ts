@@ -22,6 +22,7 @@ export type Product = {
   costPrice: string;
   sellingPrice: string;
   lowStockThreshold: number;
+  tracksBatch: boolean;
   isActive: boolean;
   createdAt: string;
   updatedAt: string;
@@ -94,6 +95,48 @@ export function poNumber(n: number): string {
   return `PO-${String(n).padStart(4, "0")}`;
 }
 
+export type InvoiceStatus = "DRAFT" | "ISSUED" | "PAID" | "CANCELLED";
+
+export type InvoiceRow = {
+  id: string;
+  number: number;
+  status: InvoiceStatus;
+  customerName: string;
+  location: string;
+  issuedAt: string | null;
+  createdAt: string;
+  itemCount: number;
+  total: number;
+};
+
+export type InvoiceLine = {
+  id: string;
+  productId: string;
+  quantity: number;
+  unitPrice: string;
+  product: { id: string; sku: string; name: string; unit: string };
+};
+
+export type Invoice = {
+  id: string;
+  number: number;
+  status: InvoiceStatus;
+  customerName: string;
+  customerPhone: string | null;
+  customerAddress: string | null;
+  notes: string | null;
+  issuedAt: string | null;
+  createdAt: string;
+  updatedAt: string;
+  location: { id: string; name: string };
+  createdBy: { id: string; name: string };
+  lines: InvoiceLine[];
+};
+
+export function invNumber(n: number): string {
+  return `INV-${String(n).padStart(4, "0")}`;
+}
+
 export type MovementType =
   | "PURCHASE"
   | "SALE"
@@ -110,6 +153,8 @@ export type StockMovement = {
   unitCost: string | null;
   reference: string | null;
   note: string | null;
+  batchNumber: string | null;
+  expiryDate: string | null;
   transferId: string | null;
   createdAt: string;
   product: { id: string; sku: string; name: string };

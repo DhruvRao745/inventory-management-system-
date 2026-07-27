@@ -31,6 +31,15 @@ type Valuation = {
 };
 type SummaryRow = { type: string; movements: number; netQuantity: number };
 type SalesPoint = { date: string; unitsSold: number };
+type ExpiringRow = {
+  movementId: string;
+  product: { id: string; name: string; sku: string; unit: string };
+  location: string;
+  batchNumber: string | null;
+  expiryDate: string;
+  quantity: number;
+  daysLeft: number;
+};
 type PurchasingReport = {
   totals: { orders: number; committedCost: number; receivedValue: number };
   byStatus: Record<string, number>;
@@ -189,6 +198,8 @@ export function ReportsPage() {
   const [purchasing, setPurchasing] = useState<PurchasingReport | null>(null);
   const [purError, setPurError] = useState<string | null>(null);
 
+  const [expiring, setExpiring] = useState<ExpiringRow[] | null>(null);
+
   useEffect(() => {
     api<Valuation>("/reports/valuation")
       .then(setValuation)
@@ -198,6 +209,10 @@ export function ReportsPage() {
     loadSummary(firstOfMonth(), today());
     loadSeries(firstOfMonth(), today());
     loadPurchasing(firstOfMonth(), today());
+    // Expiring soon is not tied to the date range — always "next 30 days".
+    api<ExpiringRow[]>("/reports/expiring?days=30")
+      .then(setExpiring)
+      .catch(() => setExpiring([]));
   }, []);
 
   // Same timezone-safe conversion the summary uses: the browser turns the
@@ -534,6 +549,72 @@ export function ReportsPage() {
               </div>
             )}
           </>
+        )}
+      </div>
+
+      {/* ---------- Expiring soon ---------- */}
+      <div className="space-y-3">
+        <SectionTitle>
+          Expiring soon{" "}
+          <span className="font-bold normal-case tracking-normal text-[var(--muted)]/60">
+            (next 30 days)
+          </span>
+        </SectionTitle>
+        {expiring && expiring.length === 0 && (
+          <div className={`${cardClass} p-6 text-sm font-bold text-[var(--muted)]`}>
+            Nothing expiring in the next 30 days.
+          </div>
+        )}
+        {expiring && expiring.length > 0 && (
+          <div className={`${cardClass} overflow-x-auto`}>
+            <table className="w-full">
+              <thead>
+                <tr className="border-b-2 border-[var(--line)] bg-[var(--panel)]">
+                  <th className={th}>Product</th>
+                  <th className={th}>Batch</th>
+                  <th className={th}>Location</th>
+                  <th className={th}>Expiry</th>
+                  <th className={`${th} text-right`}>Days left</th>
+                  <th className={`${th} text-right`}>Qty</th>
+                </tr>
+              </thead>
+              <tbody className="divide-y-2 divide-[var(--line)]/20">
+                {expiring.map((r) => (
+                  <tr key={r.movementId} className="hover:bg-[var(--hover)]">
+                    <td className={`${td} font-bold text-[var(--text)]`}>
+                      {r.product.name}
+                      <span className="ml-2 font-mono text-xs text-[var(--muted)]">
+                        {r.product.sku}
+                      </span>
+                    </td>
+                    <td className={`${td} font-mono text-xs text-[var(--muted)]`}>
+                      {r.batchNumber ?? "—"}
+                    </td>
+                    <td className={`${td} font-semibold text-[var(--muted)]`}>
+                      {r.location}
+                    </td>
+                    <td className={`${td} font-semibold text-[var(--muted)]`}>
+                      {new Date(r.expiryDate).toLocaleDateString()}
+                    </td>
+                    <td
+                      className={`${td} text-right font-black ${
+                        r.daysLeft <= 0
+                          ? "text-red-500"
+                          : r.daysLeft <= 7
+                            ? "text-amber-500"
+                            : "text-[var(--muted)]"
+                      }`}
+                    >
+                      {r.daysLeft <= 0 ? "expired" : `${r.daysLeft}d`}
+                    </td>
+                    <td className={`${td} text-right font-semibold text-[var(--muted)]`}>
+                      {r.quantity.toLocaleString()} {r.product.unit}
+                    </td>
+                  </tr>
+                ))}
+              </tbody>
+            </table>
+          </div>
         )}
       </div>
     </div>

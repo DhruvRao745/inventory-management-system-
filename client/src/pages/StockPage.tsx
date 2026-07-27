@@ -64,6 +64,8 @@ export function StockPage() {
   const [unitCost, setUnitCost] = useState("");
   const [reference, setReference] = useState("");
   const [note, setNote] = useState("");
+  const [batchNumber, setBatchNumber] = useState("");
+  const [expiryDate, setExpiryDate] = useState("");
   const [formError, setFormError] = useState<string | null>(null);
   const [formOk, setFormOk] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
@@ -176,12 +178,19 @@ export function StockPage() {
           unitCost: unitCost ? Number(unitCost) : undefined,
           reference: reference || undefined,
           note: note || undefined,
+          batchNumber: showBatch && batchNumber ? batchNumber : undefined,
+          expiryDate:
+            showBatch && expiryDate
+              ? new Date(`${expiryDate}T00:00:00`).toISOString()
+              : undefined,
         },
       });
       setQuantity("");
       setUnitCost("");
       setReference("");
       setNote("");
+      setBatchNumber("");
+      setExpiryDate("");
       setFormOk("Recorded ✓");
       await loadHistory();
     } catch (err) {
@@ -230,6 +239,8 @@ export function StockPage() {
   }
 
   const isIncoming = type === "PURCHASE" || type === "RETURN_IN";
+  const selectedProduct = products.find((p) => p.id === productId);
+  const showBatch = isIncoming && !!selectedProduct?.tracksBatch;
 
   return (
     <div className="space-y-8">
@@ -303,6 +314,25 @@ export function StockPage() {
                     value={reference}
                     onChange={(e) => setReference(e.target.value)}
                     placeholder="e.g. INV-2026-042"
+                  />
+                </Field>
+              </div>
+            )}
+
+            {showBatch && (
+              <div className="grid grid-cols-2 gap-4 rounded-[5px] border-2 border-dashed border-[var(--line)] p-3">
+                <Field label="Batch number" hint="perishable">
+                  <Input
+                    value={batchNumber}
+                    onChange={(e) => setBatchNumber(e.target.value)}
+                    placeholder="e.g. B-2026-07"
+                  />
+                </Field>
+                <Field label="Expiry date" hint="perishable">
+                  <Input
+                    type="date"
+                    value={expiryDate}
+                    onChange={(e) => setExpiryDate(e.target.value)}
                   />
                 </Field>
               </div>

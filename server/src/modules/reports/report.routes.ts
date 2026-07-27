@@ -301,3 +301,50 @@ reportsRouter.get(
     });
   })
 );
+
+/**
+ * GET /api/reports/expiring?days=30
+ *   Batches (from incoming stock-in movements that carry an expiry date)
+ *   expiring within the next N days, plus anything already expired. Oldest
+ *   expiry first. "What's about to go off?"
+ */
+reportsRouter.get(
+  "/expiring",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const days = Math.min(
+      365,
+      Math.max(1, Number(req.query.days ?? 30) || 30)
+    );
+    const companyId = req.user!.companyId;
+    const now = new Date();
+    const cutoff = new Date(now.getTime() + days * 24 * 60 * 60 * 1000);
+
+    const rows = await prisma.stockMovement.findMany({
+      where: {
+        companyId,
+        quantity: { gt: 0 }, // incoming batches only
+        expiryDate: { not: null, lte: cutoff },
+      },
+      orderBy: { expiryDate: "asc" },
+      include: {
+        product: { select: { id: true, name: true, sku: true, unit: true } },
+        location: { select: { name: true } },
+      },
+    });
+
+    const dayMs = 24 * 60 * 60 * 1000;
+    res.json(
+      rows.map((m) => ({
+        movementId: m.id,
+        product: m.product,
+        location: m.location.name,
+        batchNumber: m.batchNumber,
+        expiryDate: m.expiryDate,
+        quantity: m.quantity,
+        daysLeft: Math.ceil(
+          (new Date(m.expiryDate!).getTime() - now.getTime()) / dayMs
+        ),
+      }))
+    );
+  })
+);

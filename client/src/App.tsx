@@ -24,6 +24,8 @@ import { PurchaseOrderDetailPage } from "./pages/PurchaseOrderDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ReportsPage } from "./pages/ReportsPage";
 import { AuditPage } from "./pages/AuditPage";
+import { InvoicesPage } from "./pages/InvoicesPage";
+import { InvoiceDetailPage } from "./pages/InvoiceDetailPage";
 
 export default function App() {
   return (
@@ -55,6 +57,9 @@ export default function App() {
               path="/purchase-orders/:id"
               element={<PurchaseOrderDetailPage />}
             />
+            <Route path="/invoices" element={<InvoicesPage />} />
+            <Route path="/invoices/new" element={<InvoiceDetailPage />} />
+            <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
             <Route path="/reports" element={<ReportsPage />} />
             <Route path="/audit" element={<AuditPage />} />
             <Route path="/settings" element={<SettingsPage />} />

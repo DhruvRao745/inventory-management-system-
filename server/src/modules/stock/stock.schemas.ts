@@ -18,6 +18,9 @@ export const createMovementSchema = z
     unitCost: z.number().nonnegative().optional(),
     reference: z.string().trim().optional(), // invoice / PO number
     note: z.string().trim().optional(),
+    // Batch/expiry — captured on incoming stock for batch-tracked products (F3)
+    batchNumber: z.string().trim().optional(),
+    expiryDate: z.string().datetime().optional(),
   })
   .superRefine((data, ctx) => {
     if (data.quantity === 0) {

@@ -97,6 +97,8 @@ export async function createMovement(
         unitCost: input.unitCost,
         reference: input.reference,
         note: input.note,
+        batchNumber: input.batchNumber,
+        expiryDate: input.expiryDate ? new Date(input.expiryDate) : undefined,
         createdById: userId,
       },
       include: {
