@@ -36,6 +36,7 @@ model Company {
   suppliers      Supplier[]
   purchaseOrders PurchaseOrder[]
   invoices       Invoice[]
+  customers      Customer[]
 }
 
 // ------------------------------------------------------------
@@ -190,10 +191,13 @@ model Invoice {
   companyId       String
   number          Int // per-company sequence; display as INV-0001
   status          InvoiceStatus @default(DRAFT)
-  customerName    String
+  customerId      String? // optional link to a saved customer (A1)
+  customerName    String // snapshot — always kept even if unlinked
   customerPhone   String?
   customerAddress String?
   notes           String?
+  taxRate         Decimal? @db.Decimal(5, 2) // % applied after discount (A3)
+  discount        Decimal? @db.Decimal(12, 2) // flat amount off the subtotal (A3)
   locationId      String // where the sold stock comes from
   issuedAt        DateTime? // when it moved to ISSUED
   createdById     String
@@ -203,9 +207,30 @@ model Invoice {
   company   Company       @relation(fields: [companyId], references: [id])
   location  Location      @relation(fields: [locationId], references: [id])
   createdBy User          @relation(fields: [createdById], references: [id])
+  customer  Customer?     @relation(fields: [customerId], references: [id])
   lines     InvoiceLine[]
 
   @@unique([companyId, number])
+  @@index([companyId])
+}
+
+/// A saved customer — like a supplier, but for who we sell to (A1).
+model Customer {
+  id        String   @id @default(cuid())
+  companyId String
+  name      String
+  email     String?
+  phone     String?
+  address   String?
+  notes     String?
+  isActive  Boolean  @default(true)
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company  Company   @relation(fields: [companyId], references: [id])
+  invoices Invoice[]
+
+  @@unique([companyId, name])
   @@index([companyId])
 }
 
@@ -244,6 +269,7 @@ model Product {
   id                String   @id @default(cuid())
   companyId         String
   sku               String   // "stock keeping unit" — the code printed on the label
+  barcode           String?  // scannable code (Code128); generated, unique per company (B1)
   name              String
   description       String?
   categoryId          String?
@@ -266,6 +292,8 @@ model Product {
 
   // SKU must be unique within a company (two companies can both have "SKU-001")
   @@unique([companyId, sku])
+  // Barcode also unique per company (NULLs allowed — many products may lack one)
+  @@unique([companyId, barcode])
   @@index([companyId])
 }
 

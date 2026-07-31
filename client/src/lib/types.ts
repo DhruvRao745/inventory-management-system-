@@ -12,6 +12,7 @@ export type Category = { id: string; name: string };
 export type Product = {
   id: string;
   sku: string;
+  barcode: string | null;
   name: string;
   description: string | null;
   categoryId: string | null;
@@ -36,6 +37,18 @@ export type Location = {
 };
 
 export type Supplier = {
+  id: string;
+  name: string;
+  email: string | null;
+  phone: string | null;
+  address: string | null;
+  notes: string | null;
+  isActive: boolean;
+  createdAt: string;
+  updatedAt: string;
+};
+
+export type Customer = {
   id: string;
   name: string;
   email: string | null;
@@ -121,10 +134,13 @@ export type Invoice = {
   id: string;
   number: number;
   status: InvoiceStatus;
+  customerId: string | null;
   customerName: string;
   customerPhone: string | null;
   customerAddress: string | null;
   notes: string | null;
+  taxRate: string | null;
+  discount: string | null;
   issuedAt: string | null;
   createdAt: string;
   updatedAt: string;

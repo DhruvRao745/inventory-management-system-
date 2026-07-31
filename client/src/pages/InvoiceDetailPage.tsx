@@ -6,7 +6,7 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import type { Invoice, Product, Location } from "../lib/types";
+import type { Invoice, Product, Location, Customer } from "../lib/types";
 import { invNumber } from "../lib/types";
 import { formatMoney } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
@@ -37,13 +37,17 @@ export function InvoiceDetailPage() {
   const [inv, setInv] = useState<Invoice | null>(null);
   const [products, setProducts] = useState<Product[]>([]);
   const [locations, setLocations] = useState<Location[]>([]);
+  const [customers, setCustomers] = useState<Customer[]>([]);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
+  const [customerId, setCustomerId] = useState("");
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerAddress, setCustomerAddress] = useState("");
   const [notes, setNotes] = useState("");
+  const [taxRate, setTaxRate] = useState("");
+  const [discount, setDiscount] = useState("");
   const [locationId, setLocationId] = useState("");
   const [lines, setLines] = useState<LineDraft[]>([{ ...emptyLine }]);
   const [formError, setFormError] = useState<string | null>(null);
@@ -55,21 +59,26 @@ export function InvoiceDetailPage() {
       setLoading(true);
       setError(null);
       try {
-        const [prod, locs] = await Promise.all([
+        const [prod, locs, custs] = await Promise.all([
           api<{ items: Product[] }>("/products?take=500"),
           api<Location[]>("/locations"),
+          api<Customer[]>("/customers"),
         ]);
         setProducts(prod.items);
         setLocations(locs);
+        setCustomers(custs);
         setLocationId(locs.find((l) => l.isDefault)?.id ?? locs[0]?.id ?? "");
 
         if (!isNew) {
           const loaded = await api<Invoice>(`/invoices/${id}`);
           setInv(loaded);
+          setCustomerId(loaded.customerId ?? "");
           setCustomerName(loaded.customerName);
           setCustomerPhone(loaded.customerPhone ?? "");
           setCustomerAddress(loaded.customerAddress ?? "");
           setNotes(loaded.notes ?? "");
+          setTaxRate(loaded.taxRate ?? "");
+          setDiscount(loaded.discount ?? "");
           setLocationId(loaded.location.id);
           setLines(
             loaded.lines.map((l) => ({
@@ -91,15 +100,31 @@ export function InvoiceDetailPage() {
 
   const editable = isNew || (inv?.status === "DRAFT" && canEdit);
 
-  const total = useMemo(() => {
-    if (!editable && inv) {
-      return inv.lines.reduce((s, l) => s + Number(l.unitPrice) * l.quantity, 0);
-    }
-    return lines.reduce(
-      (s, l) => s + (Number(l.unitPrice) || 0) * (Number(l.quantity) || 0),
-      0
-    );
-  }, [editable, inv, lines]);
+  const bill = useMemo(() => {
+    const subtotal =
+      !editable && inv
+        ? inv.lines.reduce((s, l) => s + Number(l.unitPrice) * l.quantity, 0)
+        : lines.reduce(
+            (s, l) =>
+              s + (Number(l.unitPrice) || 0) * (Number(l.quantity) || 0),
+            0
+          );
+    const tr =
+      !editable && inv ? Number(inv.taxRate ?? 0) : Number(taxRate) || 0;
+    const disc =
+      !editable && inv ? Number(inv.discount ?? 0) : Number(discount) || 0;
+    const discountAmt = Math.min(Math.max(0, disc), subtotal);
+    const taxable = Math.max(0, subtotal - discountAmt);
+    const taxAmt = (taxable * tr) / 100;
+    return {
+      subtotal,
+      discountAmt,
+      taxRate: tr,
+      taxAmt,
+      total: taxable + taxAmt,
+    };
+  }, [editable, inv, lines, taxRate, discount]);
+  const total = bill.total;
 
   function setLine(i: number, patch: Partial<LineDraft>) {
     setLines((cur) => cur.map((l, idx) => (idx === i ? { ...l, ...patch } : l)));
@@ -128,10 +153,13 @@ export function InvoiceDetailPage() {
       return setFormError("Every line needs a whole quantity of 1 or more.");
 
     const body = {
+      customerId: customerId || undefined,
       customerName,
       customerPhone: customerPhone || undefined,
       customerAddress: customerAddress || undefined,
       notes: notes || undefined,
+      taxRate: taxRate ? Number(taxRate) : undefined,
+      discount: discount ? Number(discount) : undefined,
       locationId,
       lines: clean,
     };
@@ -194,8 +222,22 @@ export function InvoiceDetailPage() {
       <table><thead><tr><th>Item</th><th style="text-align:right">Qty</th>
         <th style="text-align:right">Price</th><th style="text-align:right">Amount</th></tr></thead>
         <tbody>${rows}</tbody>
-        <tfoot><tr><td colspan="3" style="text-align:right">TOTAL</td>
-          <td style="text-align:right">${formatMoney(total, currency)}</td></tr></tfoot>
+        <tfoot>
+          <tr><td colspan="3" style="text-align:right;border-top:2px solid #111">Subtotal</td>
+            <td style="text-align:right;border-top:2px solid #111">${formatMoney(bill.subtotal, currency)}</td></tr>
+          ${
+            bill.discountAmt > 0
+              ? `<tr><td colspan="3" style="text-align:right;border:none">Discount</td><td style="text-align:right;border:none">-${formatMoney(bill.discountAmt, currency)}</td></tr>`
+              : ""
+          }
+          ${
+            bill.taxAmt > 0
+              ? `<tr><td colspan="3" style="text-align:right;border:none">Tax (${bill.taxRate}%)</td><td style="text-align:right;border:none">${formatMoney(bill.taxAmt, currency)}</td></tr>`
+              : ""
+          }
+          <tr><td colspan="3" style="text-align:right;font-weight:bold;border:none">TOTAL</td>
+            <td style="text-align:right;font-weight:bold;border:none">${formatMoney(bill.total, currency)}</td></tr>
+        </tfoot>
       </table>
       ${inv.notes ? `<p class="muted" style="margin-top:20px">${inv.notes}</p>` : ""}
       </body></html>`;
@@ -267,11 +309,40 @@ export function InvoiceDetailPage() {
 
       {editable ? (
         <form onSubmit={save} className={`${cardClass} space-y-5 p-5`}>
+          {customers.length > 0 && (
+            <Field label="Saved customer" hint="optional — or type a new one below">
+              <Select
+                value={customerId}
+                onChange={(e) => {
+                  const cid = e.target.value;
+                  setCustomerId(cid);
+                  const c = customers.find((x) => x.id === cid);
+                  if (c) {
+                    setCustomerName(c.name);
+                    setCustomerPhone(c.phone ?? "");
+                    setCustomerAddress(c.address ?? "");
+                  }
+                }}
+              >
+                <option value="">— walk-in / type below —</option>
+                {customers
+                  .filter((c) => c.isActive || c.id === customerId)
+                  .map((c) => (
+                    <option key={c.id} value={c.id}>
+                      {c.name}
+                    </option>
+                  ))}
+              </Select>
+            </Field>
+          )}
           <div className="grid gap-4 sm:grid-cols-2">
             <Field label="Customer name">
               <Input
                 value={customerName}
-                onChange={(e) => setCustomerName(e.target.value)}
+                onChange={(e) => {
+                  setCustomerName(e.target.value);
+                  setCustomerId(""); // typing a name = unlink from saved customer
+                }}
               />
             </Field>
             <Field label="Phone" hint="optional">
@@ -357,17 +428,59 @@ export function InvoiceDetailPage() {
             </button>
           </div>
 
-          <Field label="Notes" hint="optional">
-            <Input value={notes} onChange={(e) => setNotes(e.target.value)} />
-          </Field>
+          <div className="grid gap-4 sm:grid-cols-3">
+            <Field label="Discount" hint="flat amount, optional">
+              <Input
+                type="number"
+                min="0"
+                step="0.01"
+                value={discount}
+                onChange={(e) => setDiscount(e.target.value)}
+              />
+            </Field>
+            <Field label="Tax %" hint="optional">
+              <Input
+                type="number"
+                min="0"
+                max="100"
+                step="0.01"
+                value={taxRate}
+                onChange={(e) => setTaxRate(e.target.value)}
+              />
+            </Field>
+            <Field label="Notes" hint="optional">
+              <Input value={notes} onChange={(e) => setNotes(e.target.value)} />
+            </Field>
+          </div>
 
-          <div className="flex items-center justify-between border-t-2 border-[var(--line)]/20 pt-4">
-            <span className="text-sm font-black text-[var(--text)]">
-              Total: {formatMoney(total, currency)}
-            </span>
-            <Button type="submit" disabled={saving}>
-              {saving ? "Saving…" : isNew ? "Create draft" : "Save changes"}
-            </Button>
+          <div className="border-t-2 border-[var(--line)]/20 pt-4">
+            <div className="ml-auto max-w-xs space-y-1 text-sm">
+              <div className="flex justify-between text-[var(--muted)]">
+                <span>Subtotal</span>
+                <span>{formatMoney(bill.subtotal, currency)}</span>
+              </div>
+              {bill.discountAmt > 0 && (
+                <div className="flex justify-between text-[var(--muted)]">
+                  <span>Discount</span>
+                  <span>−{formatMoney(bill.discountAmt, currency)}</span>
+                </div>
+              )}
+              {bill.taxAmt > 0 && (
+                <div className="flex justify-between text-[var(--muted)]">
+                  <span>Tax ({bill.taxRate}%)</span>
+                  <span>{formatMoney(bill.taxAmt, currency)}</span>
+                </div>
+              )}
+              <div className="flex justify-between border-t-2 border-[var(--line)]/20 pt-1 text-base font-black text-[var(--text)]">
+                <span>Total</span>
+                <span>{formatMoney(bill.total, currency)}</span>
+              </div>
+            </div>
+            <div className="mt-4 flex justify-end">
+              <Button type="submit" disabled={saving}>
+                {saving ? "Saving…" : isNew ? "Create draft" : "Save changes"}
+              </Button>
+            </div>
           </div>
 
           {formError && <ErrorAlert>{formError}</ErrorAlert>}
@@ -451,6 +564,34 @@ export function InvoiceDetailPage() {
                   </tr>
                 ))}
                 <tr className="border-t-2 border-[var(--line)] bg-[var(--panel)]">
+                  <td className="px-4 py-2 text-sm font-bold text-[var(--muted)]" colSpan={3}>
+                    Subtotal
+                  </td>
+                  <td className="px-4 py-2 text-right text-sm font-semibold text-[var(--muted)]">
+                    {formatMoney(bill.subtotal, currency)}
+                  </td>
+                </tr>
+                {bill.discountAmt > 0 && (
+                  <tr className="bg-[var(--panel)]">
+                    <td className="px-4 py-1 text-sm font-bold text-[var(--muted)]" colSpan={3}>
+                      Discount
+                    </td>
+                    <td className="px-4 py-1 text-right text-sm font-semibold text-[var(--muted)]">
+                      −{formatMoney(bill.discountAmt, currency)}
+                    </td>
+                  </tr>
+                )}
+                {bill.taxAmt > 0 && (
+                  <tr className="bg-[var(--panel)]">
+                    <td className="px-4 py-1 text-sm font-bold text-[var(--muted)]" colSpan={3}>
+                      Tax ({bill.taxRate}%)
+                    </td>
+                    <td className="px-4 py-1 text-right text-sm font-semibold text-[var(--muted)]">
+                      {formatMoney(bill.taxAmt, currency)}
+                    </td>
+                  </tr>
+                )}
+                <tr className="bg-[var(--panel)]">
                   <td
                     className="px-4 py-3 text-sm font-black text-[var(--text)]"
                     colSpan={3}
@@ -458,7 +599,7 @@ export function InvoiceDetailPage() {
                     TOTAL
                   </td>
                   <td className="px-4 py-3 text-right text-sm font-black text-[var(--accent)]">
-                    {formatMoney(total, currency)}
+                    {formatMoney(bill.total, currency)}
                   </td>
                 </tr>
               </tbody>

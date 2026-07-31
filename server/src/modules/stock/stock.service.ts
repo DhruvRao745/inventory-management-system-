@@ -10,6 +10,7 @@
 import { randomUUID } from "node:crypto";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error.js";
+import { notifyLowStock } from "../../lib/notify.js";
 import type {
   CreateMovementInput,
   TransferInput,
@@ -68,7 +69,7 @@ export async function createMovement(
   // The no-negative-stock rule. We check and write inside ONE
   // transaction so two simultaneous sales can't both pass the check
   // and together oversell the shelf.
-  return prisma.$transaction(async (tx) => {
+  const movement = await prisma.$transaction(async (tx) => {
     if (signedQuantity < 0) {
       const sum = await tx.stockMovement.aggregate({
         where: {
@@ -107,6 +108,44 @@ export async function createMovement(
       },
     });
   });
+
+  // After an outgoing movement, fire a low-stock alert if this pushed the
+  // product at/below its threshold. Fire-and-forget — never blocks or breaks
+  // the movement. Dormant unless notification keys are configured.
+  if (signedQuantity < 0) {
+    void (async () => {
+      try {
+        const [sum, product] = await Promise.all([
+          prisma.stockMovement.aggregate({
+            where: {
+              companyId,
+              productId: input.productId,
+              locationId: input.locationId,
+            },
+            _sum: { quantity: true },
+          }),
+          prisma.product.findUnique({
+            where: { id: input.productId },
+            select: { name: true, sku: true, lowStockThreshold: true },
+          }),
+        ]);
+        const onHand = sum._sum.quantity ?? 0;
+        if (product && product.lowStockThreshold > 0 && onHand <= product.lowStockThreshold) {
+          await notifyLowStock({
+            productName: product.name,
+            sku: product.sku,
+            onHand,
+            threshold: product.lowStockThreshold,
+            location: movement.location.name,
+          });
+        }
+      } catch {
+        /* alerts must never affect the stock operation */
+      }
+    })();
+  }
+
+  return movement;
 }
 
 /**

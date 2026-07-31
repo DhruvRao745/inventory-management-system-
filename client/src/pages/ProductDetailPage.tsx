@@ -96,6 +96,9 @@ export function ProductDetailPage() {
             </h1>
             <div className="mt-1 text-sm font-semibold text-[var(--muted)]">
               <span className="font-mono text-xs">{product.sku}</span>
+              {product.barcode && (
+                <span className="font-mono text-xs"> · ▮▏ {product.barcode}</span>
+              )}
               {product.category && <span> · {product.category.name}</span>}
               {product.description && <span> · {product.description}</span>}
             </div>

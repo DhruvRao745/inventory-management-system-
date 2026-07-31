@@ -348,3 +348,134 @@ reportsRouter.get(
     );
   })
 );
+
+/**
+ * GET /api/reports/sales?from&to
+ *   Revenue from issued/paid invoices in the window: total, by product, and
+ *   by customer. The selling mirror of the purchasing report.
+ */
+reportsRouter.get(
+  "/sales",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const { from, to } = dateRangeSchema.parse(req.query);
+    const companyId = req.user!.companyId;
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+    if (fromDate > toDate) throw new AppError(400, "'from' is after 'to'");
+    const round2 = (n: number) => Math.round(n * 100) / 100;
+
+    const invoices = await prisma.invoice.findMany({
+      where: {
+        companyId,
+        status: { in: ["ISSUED", "PAID"] },
+        issuedAt: { gte: fromDate, lte: toDate },
+      },
+      include: {
+        lines: {
+          include: { product: { select: { id: true, name: true, unit: true } } },
+        },
+      },
+    });
+
+    const byProduct = new Map<
+      string,
+      { productId: string; name: string; unit: string; units: number; revenue: number }
+    >();
+    const byCustomer = new Map<
+      string,
+      { name: string; invoices: number; revenue: number }
+    >();
+    let totalRevenue = 0;
+
+    for (const inv of invoices) {
+      const invTotal = inv.lines.reduce(
+        (s, l) => s + Number(l.unitPrice) * l.quantity,
+        0
+      );
+      totalRevenue += invTotal;
+
+      const c = byCustomer.get(inv.customerName) ?? {
+        name: inv.customerName,
+        invoices: 0,
+        revenue: 0,
+      };
+      c.invoices += 1;
+      c.revenue += invTotal;
+      byCustomer.set(inv.customerName, c);
+
+      for (const l of inv.lines) {
+        const rev = Number(l.unitPrice) * l.quantity;
+        const p = byProduct.get(l.productId) ?? {
+          productId: l.productId,
+          name: l.product.name,
+          unit: l.product.unit,
+          units: 0,
+          revenue: 0,
+        };
+        p.units += l.quantity;
+        p.revenue += rev;
+        byProduct.set(l.productId, p);
+      }
+    }
+
+    res.json({
+      totals: { revenue: round2(totalRevenue), invoices: invoices.length },
+      byProduct: [...byProduct.values()]
+        .map((p) => ({ ...p, revenue: round2(p.revenue) }))
+        .sort((a, b) => b.revenue - a.revenue),
+      byCustomer: [...byCustomer.values()]
+        .map((c) => ({ ...c, revenue: round2(c.revenue) }))
+        .sort((a, b) => b.revenue - a.revenue),
+    });
+  })
+);
+
+/**
+ * GET /api/reports/reorder
+ *   Active products at/below their low-stock threshold, with a suggested
+ *   reorder quantity and the preferred supplier — so you can draft a PO in
+ *   one click. "What should I buy, and from whom?"
+ */
+reportsRouter.get(
+  "/reorder",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const companyId = req.user!.companyId;
+
+    const products = await prisma.product.findMany({
+      where: { companyId, isActive: true, lowStockThreshold: { gt: 0 } },
+      include: { preferredSupplier: { select: { id: true, name: true } } },
+    });
+
+    // On-hand per product = sum of all its movements (across locations).
+    const grouped = await prisma.stockMovement.groupBy({
+      by: ["productId"],
+      where: { companyId },
+      _sum: { quantity: true },
+    });
+    const onHandById = new Map(
+      grouped.map((g) => [g.productId, g._sum.quantity ?? 0])
+    );
+
+    const rows = products
+      .map((p) => {
+        const onHand = onHandById.get(p.id) ?? 0;
+        return { p, onHand };
+      })
+      .filter(({ p, onHand }) => onHand <= p.lowStockThreshold)
+      .map(({ p, onHand }) => ({
+        productId: p.id,
+        name: p.name,
+        sku: p.sku,
+        unit: p.unit,
+        onHand,
+        threshold: p.lowStockThreshold,
+        // Top back up to ~2× the threshold (at least 1).
+        suggestedQty: Math.max(1, p.lowStockThreshold * 2 - onHand),
+        costPrice: p.costPrice,
+        preferredSupplier: p.preferredSupplier,
+      }))
+      .sort((a, b) => a.onHand - b.onHand);
+
+    res.json(rows);
+  })
+);

@@ -17,6 +17,18 @@ function invRef(number: number): string {
   return `INV-${String(number).padStart(4, "0")}`;
 }
 
+// Grand total = (subtotal − discount) + tax on that amount.
+export function grandTotal(
+  subtotal: number,
+  taxRate: unknown,
+  discount: unknown
+): number {
+  const disc = Number(discount ?? 0);
+  const taxable = Math.max(0, subtotal - disc);
+  const tax = taxable * (Number(taxRate ?? 0) / 100);
+  return Math.round((taxable + tax) * 100) / 100;
+}
+
 const invInclude = {
   location: { select: { id: true, name: true } },
   createdBy: { select: { id: true, name: true } },
@@ -66,15 +78,25 @@ export async function createInvoice(
     });
     const number = (last?.number ?? 0) + 1;
 
+    if (input.customerId) {
+      const c = await tx.customer.findFirst({
+        where: { id: input.customerId, companyId },
+      });
+      if (!c) throw new AppError(400, "Unknown customer");
+    }
+
     return tx.invoice.create({
       data: {
         companyId,
         createdById,
         number,
+        customerId: input.customerId || null,
         customerName: input.customerName,
         customerPhone: input.customerPhone,
         customerAddress: input.customerAddress,
         notes: input.notes,
+        taxRate: input.taxRate ?? null,
+        discount: input.discount ?? null,
         locationId: input.locationId,
         lines: {
           create: input.lines.map((l) => ({
@@ -94,6 +116,7 @@ export async function listInvoices(companyId: string, q: ListInvoiceQuery) {
     companyId,
     ...(q.status ? { status: q.status } : {}),
     ...(q.number ? { number: q.number } : {}),
+    ...(q.customerId ? { customerId: q.customerId } : {}),
   };
 
   const [items, total] = await Promise.all([
@@ -119,10 +142,11 @@ export async function listInvoices(companyId: string, q: ListInvoiceQuery) {
     issuedAt: inv.issuedAt,
     createdAt: inv.createdAt,
     itemCount: inv.lines.length,
-    total:
-      Math.round(
-        inv.lines.reduce((s, l) => s + Number(l.unitPrice) * l.quantity, 0) * 100
-      ) / 100,
+    total: grandTotal(
+      inv.lines.reduce((s, l) => s + Number(l.unitPrice) * l.quantity, 0),
+      inv.taxRate,
+      inv.discount
+    ),
   }));
 
   return { items: rows, total, take: q.take, skip: q.skip };
@@ -162,9 +186,18 @@ export async function updateInvoice(
       await tx.invoiceLine.deleteMany({ where: { invoiceId: id } });
     }
 
+    if (input.customerId) {
+      const c = await tx.customer.findFirst({
+        where: { id: input.customerId, companyId },
+      });
+      if (!c) throw new AppError(400, "Unknown customer");
+    }
+
     return tx.invoice.update({
       where: { id },
       data: {
+        customerId:
+          input.customerId === undefined ? undefined : input.customerId || null,
         customerName: input.customerName,
         customerPhone:
           input.customerPhone === undefined ? undefined : input.customerPhone,
@@ -173,6 +206,8 @@ export async function updateInvoice(
             ? undefined
             : input.customerAddress,
         notes: input.notes === undefined ? undefined : input.notes,
+        taxRate: input.taxRate === undefined ? undefined : input.taxRate,
+        discount: input.discount === undefined ? undefined : input.discount,
         locationId: input.locationId,
         ...(input.lines
           ? {

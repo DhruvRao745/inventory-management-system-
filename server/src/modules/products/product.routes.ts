@@ -16,6 +16,7 @@ import {
   createProductSchema,
   updateProductSchema,
   listProductsQuerySchema,
+  importProductsSchema,
 } from "./product.schemas.js";
 import * as productService from "./product.service.js";
 import { asyncHandler } from "../../middleware/error.js";
@@ -44,6 +45,24 @@ productsRouter.get(
   })
 );
 
+// Barcode lookup for the scan stations — MUST be declared before "/:id"
+// so "/lookup" isn't captured as an id.
+productsRouter.get(
+  "/lookup",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const barcode = String(req.query.barcode ?? "").trim();
+    if (!barcode) {
+      res.status(400).json({ error: "barcode is required" });
+      return;
+    }
+    const product = await productService.getProductByBarcode(
+      req.user!.companyId,
+      barcode
+    );
+    res.json(product);
+  })
+);
+
 productsRouter.get(
   "/:id",
   asyncHandler(async (req: AuthRequest, res) => {
@@ -65,6 +84,19 @@ productsRouter.post(
       input
     );
     res.status(201).json(product);
+  })
+);
+
+productsRouter.post(
+  "/import",
+  canWrite,
+  asyncHandler(async (req: AuthRequest, res) => {
+    const { rows } = importProductsSchema.parse(req.body);
+    const result = await productService.importProducts(
+      req.user!.companyId,
+      rows
+    );
+    res.json(result);
   })
 );
 

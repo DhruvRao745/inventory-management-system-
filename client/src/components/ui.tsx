@@ -10,6 +10,7 @@
  * These exact classes ARE our design tokens. Change them here,
  * the whole app follows.
  */
+import { forwardRef } from "react";
 import type {
   ButtonHTMLAttributes,
   InputHTMLAttributes,
@@ -59,12 +60,12 @@ const fieldClass = `w-full rounded-[5px] border-2 border-[var(--line)] bg-[var(-
   placeholder:text-[var(--muted)] placeholder:opacity-80 placeholder:font-medium
   focus:border-[var(--accent)] transition-colors duration-100`;
 
-export function Input({
-  className = "",
-  ...props
-}: InputHTMLAttributes<HTMLInputElement>) {
-  return <input className={`${fieldClass} ${className}`} {...props} />;
-}
+export const Input = forwardRef<
+  HTMLInputElement,
+  InputHTMLAttributes<HTMLInputElement>
+>(function Input({ className = "", ...props }, ref) {
+  return <input ref={ref} className={`${fieldClass} ${className}`} {...props} />;
+});
 
 export function Select({
   className = "",

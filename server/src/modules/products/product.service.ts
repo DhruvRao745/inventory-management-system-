@@ -64,6 +64,55 @@ export async function getProduct(companyId: string, id: string) {
   return product;
 }
 
+// Resolve a scanned barcode to a product (tenant-scoped). Used by the scan
+// stations. 404 if no active product carries that code.
+export async function getProductByBarcode(companyId: string, barcode: string) {
+  const product = await prisma.product.findFirst({
+    where: { companyId, barcode, isActive: true },
+    include: {
+      category: { select: { id: true, name: true } },
+      preferredSupplier: { select: { id: true, name: true } },
+    },
+  });
+  if (!product) throw new AppError(404, "No product found for that barcode");
+  return product;
+}
+
+// Bulk import from parsed CSV rows. Validates + creates each independently,
+// collecting per-row errors so one bad row doesn't sink the whole batch.
+export async function importProducts(
+  companyId: string,
+  rows: Record<string, unknown>[]
+) {
+  const { importRowSchema } = await import("./product.schemas.js");
+  let created = 0;
+  const errors: { row: number; sku: string; message: string }[] = [];
+
+  for (let i = 0; i < rows.length; i++) {
+    const raw = rows[i];
+    const parsed = importRowSchema.safeParse(raw);
+    if (!parsed.success) {
+      errors.push({
+        row: i + 1,
+        sku: String(raw.sku ?? ""),
+        message: parsed.error.issues[0]?.message ?? "Invalid row",
+      });
+      continue;
+    }
+    try {
+      await createProduct(companyId, parsed.data);
+      created++;
+    } catch (err) {
+      errors.push({
+        row: i + 1,
+        sku: parsed.data.sku,
+        message: err instanceof AppError ? err.message : "Failed to create",
+      });
+    }
+  }
+  return { created, failed: errors.length, errors };
+}
+
 export async function createProduct(
   companyId: string,
   input: CreateProductInput
@@ -96,8 +145,14 @@ export async function createProduct(
     if (!supplier) throw new AppError(400, "Unknown supplier");
   }
 
+  const barcode = input.barcode || null;
+  if (barcode) {
+    const dup = await prisma.product.findFirst({ where: { companyId, barcode } });
+    if (dup) throw new AppError(409, `Barcode "${barcode}" is already in use`);
+  }
+
   return prisma.product.create({
-    data: { ...input, categoryId, preferredSupplierId, companyId },
+    data: { ...input, categoryId, preferredSupplierId, barcode, companyId },
     include: {
       category: { select: { id: true, name: true } },
       preferredSupplier: { select: { id: true, name: true } },
@@ -144,9 +199,18 @@ export async function updateProduct(
     if (!supplier) throw new AppError(400, "Unknown supplier");
   }
 
+  const barcode =
+    input.barcode === undefined ? undefined : input.barcode || null;
+  if (barcode) {
+    const dup = await prisma.product.findFirst({
+      where: { companyId, barcode, NOT: { id } },
+    });
+    if (dup) throw new AppError(409, `Barcode "${barcode}" is already in use`);
+  }
+
   return prisma.product.update({
     where: { id },
-    data: { ...input, categoryId, preferredSupplierId },
+    data: { ...input, categoryId, preferredSupplierId, barcode },
     include: {
       category: { select: { id: true, name: true } },
       preferredSupplier: { select: { id: true, name: true } },
