@@ -307,21 +307,52 @@ export async function payInvoice(companyId: string, id: string) {
   });
 }
 
-export async function cancelInvoice(companyId: string, id: string) {
-  const inv = await prisma.invoice.findFirst({
-    where: { id, companyId },
-    select: { id: true, status: true },
-  });
-  if (!inv) throw new AppError(404, "Invoice not found");
-  if (inv.status !== "DRAFT") {
-    throw new AppError(
-      409,
-      "Only draft invoices can be cancelled (issued ones have moved stock)"
-    );
-  }
-  return prisma.invoice.update({
-    where: { id },
-    data: { status: "CANCELLED" },
-    include: invInclude,
+/**
+ * Cancel an invoice. A DRAFT just flips to CANCELLED. An ISSUED one already
+ * deducted stock, so we RESTORE it: write a compensating RETURN_IN movement
+ * (+qty) per line back into the same location, tagged to the invoice. PAID
+ * invoices can't be cancelled (that's a refund, out of scope).
+ */
+export async function cancelInvoice(
+  companyId: string,
+  userId: string,
+  id: string
+) {
+  return prisma.$transaction(async (tx) => {
+    const inv = await tx.invoice.findFirst({
+      where: { id, companyId },
+      include: { lines: true },
+    });
+    if (!inv) throw new AppError(404, "Invoice not found");
+    if (inv.status === "CANCELLED") {
+      throw new AppError(409, "This invoice is already cancelled");
+    }
+    if (inv.status === "PAID") {
+      throw new AppError(409, "Paid invoices can't be cancelled");
+    }
+
+    if (inv.status === "ISSUED") {
+      const ref = invRef(inv.number);
+      for (const line of inv.lines) {
+        await tx.stockMovement.create({
+          data: {
+            companyId,
+            productId: line.productId,
+            locationId: inv.locationId,
+            type: "RETURN_IN",
+            quantity: line.quantity, // + back into stock
+            reference: ref,
+            note: `Invoice ${ref} cancelled — stock restored`,
+            createdById: userId,
+          },
+        });
+      }
+    }
+
+    return tx.invoice.update({
+      where: { id },
+      data: { status: "CANCELLED" },
+      include: invInclude,
+    });
   });
 }

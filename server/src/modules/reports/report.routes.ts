@@ -14,6 +14,7 @@ import { z } from "zod";
 import { prisma } from "../../lib/prisma.js";
 import { asyncHandler, AppError } from "../../middleware/error.js";
 import { requireAuth, type AuthRequest } from "../../middleware/auth.js";
+import { grandTotal } from "../invoices/inv.service.js";
 
 // The client sends exact universal instants (ISO format, e.g.
 // "2026-07-08T18:30:00.000Z") — IT knows the user's timezone; we don't.
@@ -388,10 +389,13 @@ reportsRouter.get(
     let totalRevenue = 0;
 
     for (const inv of invoices) {
-      const invTotal = inv.lines.reduce(
+      const subtotal = inv.lines.reduce(
         (s, l) => s + Number(l.unitPrice) * l.quantity,
         0
       );
+      // The ACTUAL money for this invoice — after discount, plus tax — same
+      // as the invoice total the customer sees.
+      const invTotal = grandTotal(subtotal, inv.taxRate, inv.discount);
       totalRevenue += invTotal;
 
       const c = byCustomer.get(inv.customerName) ?? {
@@ -404,7 +408,10 @@ reportsRouter.get(
       byCustomer.set(inv.customerName, c);
 
       for (const l of inv.lines) {
-        const rev = Number(l.unitPrice) * l.quantity;
+        const lineSub = Number(l.unitPrice) * l.quantity;
+        // Spread the invoice's discount/tax across lines by their share of
+        // the subtotal, so per-product revenue sums back to the invoice total.
+        const rev = subtotal > 0 ? invTotal * (lineSub / subtotal) : 0;
         const p = byProduct.get(l.productId) ?? {
           productId: l.productId,
           name: l.product.name,

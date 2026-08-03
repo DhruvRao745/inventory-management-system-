@@ -299,9 +299,17 @@ export function InvoiceDetailPage() {
               </>
             )}
             {canEdit && inv.status === "ISSUED" && (
-              <Button variant="secondary" onClick={() => action("pay", "Failed to mark paid")}>
-                Mark paid
-              </Button>
+              <>
+                <Button
+                  variant="secondary"
+                  onClick={() => action("pay", "Failed to mark paid")}
+                >
+                  Mark paid
+                </Button>
+                <Button variant="danger" onClick={() => setConfirmCancel(true)}>
+                  Cancel
+                </Button>
+              </>
             )}
           </div>
         )}
@@ -374,8 +382,12 @@ export function InvoiceDetailPage() {
           </div>
 
           <div className="space-y-2">
-            <div className="text-xs font-black uppercase tracking-wide text-[var(--muted)]">
-              Items
+            <div className="flex items-center gap-2 text-xs font-black uppercase tracking-wide text-[var(--muted)]">
+              <span className="flex-1">Item</span>
+              <span className="w-20 text-center">Qty</span>
+              <span className="w-28 text-right">Unit price</span>
+              <span className="w-28 text-right">Amount</span>
+              <span className="w-6" />
             </div>
             {lines.map((l, i) => (
               <div key={i} className="flex items-end gap-2">
@@ -385,7 +397,15 @@ export function InvoiceDetailPage() {
                       (p) => p.isActive || p.id === l.productId
                     )}
                     value={l.productId}
-                    onChange={(pid) => setLine(i, { productId: pid })}
+                    onChange={(pid) => {
+                      // Pre-fill the unit price with the product's selling
+                      // price (still editable afterwards).
+                      const prod = products.find((p) => p.id === pid);
+                      setLine(i, {
+                        productId: pid,
+                        unitPrice: prod ? prod.sellingPrice : l.unitPrice,
+                      });
+                    }}
                   />
                 </div>
                 <div className="w-20">
@@ -408,11 +428,17 @@ export function InvoiceDetailPage() {
                     onChange={(e) => setLine(i, { unitPrice: e.target.value })}
                   />
                 </div>
+                <div className="w-28 pb-2 text-right text-sm font-black text-[var(--text)]">
+                  {formatMoney(
+                    (Number(l.quantity) || 0) * (Number(l.unitPrice) || 0),
+                    currency
+                  )}
+                </div>
                 <button
                   type="button"
                   onClick={() => removeLine(i)}
                   disabled={lines.length === 1}
-                  className="px-2 pb-2 text-lg font-black text-[var(--muted)] hover:text-red-500 disabled:opacity-30"
+                  className="w-6 pb-2 text-lg font-black text-[var(--muted)] hover:text-red-500 disabled:opacity-30"
                   aria-label="Remove line"
                 >
                   ×
@@ -611,7 +637,11 @@ export function InvoiceDetailPage() {
       {confirmCancel && (
         <ConfirmModal
           title={`Cancel ${inv ? invNumber(inv.number) : "this invoice"}?`}
-          message="This marks the draft cancelled. It stays on record but can't be issued."
+          message={
+            inv?.status === "ISSUED"
+              ? "This cancels the invoice and returns its items to stock. It stays on record as cancelled."
+              : "This marks the draft cancelled. It stays on record but can't be issued."
+          }
           confirmLabel="Cancel invoice"
           danger
           onConfirm={async () => {

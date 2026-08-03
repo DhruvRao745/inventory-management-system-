@@ -196,7 +196,7 @@ function SidebarContent({
       )}
       <nav className="-mt-3 flex flex-col gap-2">
         {navItems.map((item) => {
-          const showBadge = item.to === "/stock" && lowStockCount > 0;
+          const showBadge = item.to === "/products" && lowStockCount > 0;
           return (
             <NavLink
               key={item.to}

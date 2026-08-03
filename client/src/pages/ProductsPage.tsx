@@ -74,6 +74,42 @@ export function ProductsPage() {
   const [categories, setCategories] = useState<CategoryWithCount[]>([]);
   const [categoryFilter, setCategoryFilter] = useState("");
   const [suppliers, setSuppliers] = useState<Supplier[]>([]);
+  const [showLowOnly, setShowLowOnly] = useState(false);
+  const [showRetired, setShowRetired] = useState(false);
+
+  // Toggle "low stock only": when on, load the whole catalog (so low items on
+  // any page are included) and filter client-side to the low set.
+  function toggleLowOnly() {
+    const next = !showLowOnly;
+    setShowLowOnly(next);
+    load(search, categoryFilter, 0, next ? 500 : PAGE_SIZE, showRetired);
+  }
+
+  // Toggle "show retired": includes deactivated products in the list.
+  function toggleRetired() {
+    const next = !showRetired;
+    setShowRetired(next);
+    load(search, categoryFilter, 0, showLowOnly ? 500 : PAGE_SIZE, next);
+  }
+
+  async function reactivate(p: Product) {
+    try {
+      await api(`/products/${p.id}`, {
+        method: "PATCH",
+        body: { isActive: true },
+      });
+      await load(
+        search,
+        categoryFilter,
+        skip,
+        showLowOnly ? 500 : PAGE_SIZE,
+        showRetired
+      );
+      await loadLevels();
+    } catch (err) {
+      setError(err instanceof ApiError ? err.message : "Failed to reactivate");
+    }
+  }
 
   const [catModalOpen, setCatModalOpen] = useState(false);
   const [newCatName, setNewCatName] = useState("");
@@ -85,14 +121,21 @@ export function ProductsPage() {
   const [formError, setFormError] = useState<string | null>(null);
   const [busy, setBusy] = useState(false);
 
-  async function load(searchTerm = "", catId = "", skipVal = 0) {
+  async function load(
+    searchTerm = "",
+    catId = "",
+    skipVal = 0,
+    takeVal = PAGE_SIZE,
+    includeInactive = false
+  ) {
     setLoading(true);
     setError(null);
     try {
       const params = new URLSearchParams();
       if (searchTerm) params.set("search", searchTerm);
       if (catId) params.set("categoryId", catId);
-      params.set("take", String(PAGE_SIZE));
+      if (includeInactive) params.set("includeInactive", "true");
+      params.set("take", String(takeVal));
       params.set("skip", String(skipVal));
       const data = await api<ProductsResponse>(`/products?${params}`);
       setProducts(data.items);
@@ -297,12 +340,18 @@ export function ProductsPage() {
     setConfirm({
       title: `Retire "${p.name}"?`,
       message:
-        "It will disappear from active lists. Its history and stock records stay intact — you can't undo this from here.",
+        "It disappears from active lists (history + stock records stay intact). You can bring it back anytime with “Show retired” → Reactivate.",
       confirmLabel: "Retire",
       danger: true,
       action: async () => {
         await api(`/products/${p.id}`, { method: "DELETE" });
-        await load(search, categoryFilter, skip);
+        await load(
+          search,
+          categoryFilter,
+          skip,
+          showLowOnly ? 500 : PAGE_SIZE,
+          showRetired
+        );
         await loadLevels();
       },
     });
@@ -337,8 +386,31 @@ export function ProductsPage() {
     });
   }
 
+  const lowCount = lowIds.size;
+  const shown = showRetired
+    ? products.filter((p) => !p.isActive) // only retired
+    : showLowOnly
+      ? products.filter((p) => lowIds.has(p.id))
+      : products.filter((p) => p.isActive);
+
   return (
     <div className="space-y-5">
+      {/* Low-stock banner — the at-a-glance "what's running low" */}
+      {lowCount > 0 && (
+        <div className="flex flex-wrap items-center justify-between gap-3 rounded-[6px] border-2 border-red-500 bg-red-500/10 px-4 py-3">
+          <span className="text-sm font-black text-red-500">
+            ⚠ {lowCount} product{lowCount === 1 ? "" : "s"} low on stock
+          </span>
+          <button
+            type="button"
+            onClick={toggleLowOnly}
+            className="rounded-[5px] border-2 border-[var(--line)] bg-[var(--card)] px-3 py-1 text-xs font-bold text-[var(--text)] shadow-[2px_2px_0px_var(--shadow)] hover:bg-[var(--hover)]"
+          >
+            {showLowOnly ? "Show all products" : "Show low stock only"}
+          </button>
+        </div>
+      )}
+
       {/* Toolbar */}
       <div className="flex flex-wrap items-center gap-3">
         <form onSubmit={handleSearch} className="flex flex-wrap items-center gap-3">
@@ -397,6 +469,17 @@ export function ProductsPage() {
             >
               Import CSV
             </button>
+            <button
+              type="button"
+              onClick={toggleRetired}
+              className={`text-sm font-bold underline ${
+                showRetired
+                  ? "text-[var(--accent)]"
+                  : "text-[var(--muted)] hover:text-[var(--text)]"
+              }`}
+            >
+              {showRetired ? "Hide retired" : "Show retired"}
+            </button>
             <div className="ml-auto">
               <Button onClick={openAdd}>+ Add product</Button>
             </div>
@@ -409,17 +492,19 @@ export function ProductsPage() {
         <p className="text-sm font-bold text-[var(--muted)]">Loading…</p>
       )}
       {error && <ErrorAlert>{error}</ErrorAlert>}
-      {!loading && !error && products.length === 0 && (
+      {!loading && !error && shown.length === 0 && (
         <div className={`${cardClass} p-8 text-center`}>
           <div className="text-lg font-black text-[var(--text)]">
-            No products yet
+            {showLowOnly ? "Nothing low on stock 🎉" : "No products yet"}
           </div>
           <p className="mt-1 text-sm font-semibold text-[var(--muted)]">
-            {canWrite
-              ? "Add your first product to start tracking stock."
-              : "Nothing here yet."}
+            {showLowOnly
+              ? "Every product is above its alert threshold."
+              : canWrite
+                ? "Add your first product to start tracking stock."
+                : "Nothing here yet."}
           </p>
-          {canWrite && (
+          {canWrite && !showLowOnly && (
             <div className="mt-4">
               <Button onClick={openAdd}>+ Add product</Button>
             </div>
@@ -428,7 +513,7 @@ export function ProductsPage() {
       )}
 
       {/* Table */}
-      {!loading && !error && products.length > 0 && (
+      {!loading && !error && shown.length > 0 && (
         <div className={`${cardClass} overflow-x-auto`}>
           <table className="w-full">
             <thead>
@@ -445,7 +530,7 @@ export function ProductsPage() {
               </tr>
             </thead>
             <tbody className="divide-y-2 divide-[var(--line)]/20">
-              {products.map((p) => (
+              {shown.map((p) => (
                 <tr
                   key={p.id}
                   className="hover:bg-[var(--hover)]"
@@ -471,6 +556,11 @@ export function ProductsPage() {
                         title="Low stock at one or more locations"
                       >
                         ⚠ low
+                      </span>
+                    )}
+                    {!p.isActive && (
+                      <span className="ml-2 rounded-[4px] border-2 border-[var(--line)] bg-[var(--panel)] px-1.5 py-0.5 text-[10px] font-black tracking-wide text-[var(--muted)]">
+                        RETIRED
                       </span>
                     )}
                   </td>
@@ -517,12 +607,21 @@ export function ProductsPage() {
                       >
                         Edit
                       </button>
-                      <button
-                        onClick={() => handleRetire(p)}
-                        className="ml-4 font-bold text-[var(--muted)]/60 hover:text-red-500"
-                      >
-                        Retire
-                      </button>
+                      {p.isActive ? (
+                        <button
+                          onClick={() => handleRetire(p)}
+                          className="ml-4 font-bold text-[var(--muted)]/60 hover:text-red-500"
+                        >
+                          Retire
+                        </button>
+                      ) : (
+                        <button
+                          onClick={() => reactivate(p)}
+                          className="ml-4 font-bold text-[var(--muted)]/60 hover:text-emerald-500"
+                        >
+                          Reactivate
+                        </button>
+                      )}
                     </td>
                   )}
                 </tr>
@@ -531,10 +630,11 @@ export function ProductsPage() {
           </table>
           <div className="flex items-center justify-between border-t-2 border-[var(--line)] bg-[var(--panel)] px-4 py-2.5">
             <span className="text-xs font-bold text-[var(--muted)]">
-              Showing {total === 0 ? 0 : skip + 1}–{skip + products.length} of{" "}
-              {total}
+              {showLowOnly
+                ? `Showing ${shown.length} low-stock product${shown.length === 1 ? "" : "s"}`
+                : `Showing ${total === 0 ? 0 : skip + 1}–${skip + products.length} of ${total}`}
             </span>
-            {total > PAGE_SIZE && (
+            {!showLowOnly && total > PAGE_SIZE && (
               <div className="flex items-center gap-2">
                 <button
                   disabled={skip === 0}

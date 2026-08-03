@@ -22,7 +22,10 @@ export const createProductSchema = z.object({
 });
 
 // For editing: same fields, but ALL optional — send only what changes.
-export const updateProductSchema = createProductSchema.partial();
+// isActive lets us reactivate a retired product.
+export const updateProductSchema = createProductSchema
+  .partial()
+  .extend({ isActive: z.boolean().optional() });
 
 // For list filters arriving in the URL, like /api/products?search=pen
 // URL values are always text, so coerce turns "true" into true.

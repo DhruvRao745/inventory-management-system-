@@ -273,7 +273,14 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
   const [products, locations] = await Promise.all([
     prisma.product.findMany({
       where: { id: { in: productIds }, companyId },
-      select: { id: true, sku: true, name: true, unit: true, lowStockThreshold: true },
+      select: {
+        id: true,
+        sku: true,
+        name: true,
+        unit: true,
+        lowStockThreshold: true,
+        isActive: true,
+      },
     }),
     prisma.location.findMany({
       where: { id: { in: locationIds }, companyId },
@@ -293,7 +300,8 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
         product,
         location,
         quantity,
-        lowStock: quantity <= product.lowStockThreshold,
+        // Retired products never count as low stock (no alerts/banner/badge).
+        lowStock: product.isActive && quantity <= product.lowStockThreshold,
       };
     })
     .filter((row) => row !== null);

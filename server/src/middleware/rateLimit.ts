@@ -5,7 +5,7 @@
  *   Catches bots hammering from one machine, even across many emails.
  *   Loose enough that a whole office behind one router never feels it.
  *
- * loginLimiter (strict) — 10 FAILED attempts / 15 min per IP+email pair.
+ * loginLimiter (strict) — 5 FAILED attempts / 20 min per IP+email pair.
  *   Wrong passwords on rao@ block only rao@ from that network —
  *   colleagues on the same office IP are unaffected.
  *   skipSuccessfulRequests: correct logins don't count toward the limit,
@@ -31,8 +31,8 @@ export const authIpLimiter = rateLimit({
 });
 
 export const loginLimiter = rateLimit({
-  windowMs: 15 * 60 * 1000,
-  limit: 10,
+  windowMs: 20 * 60 * 1000, // 20-minute freeze
+  limit: 5, // 5 failed attempts, then locked out
   skipSuccessfulRequests: true, // only FAILED logins count
   keyGenerator: (req: Request) => {
     // bucket = visitor IP + the email they're attacking
@@ -40,5 +40,11 @@ export const loginLimiter = rateLimit({
       typeof req.body?.email === "string" ? req.body.email.toLowerCase() : "";
     return `${req.ip ?? "unknown"}|${email}`;
   },
-  ...tooMany,
+  standardHeaders: true,
+  legacyHeaders: false,
+  handler: (_req, res) => {
+    res.status(429).json({
+      error: "Too many failed attempts — please try again in 20 minutes",
+    });
+  },
 });

@@ -39,8 +39,26 @@ if (isProduction) {
 }
 
 // --- Global middleware (runs on every request, in order) ---
-// contentSecurityPolicy off in dev only — it blocks Vite's live-reload
-app.use(helmet({ contentSecurityPolicy: isProduction ? undefined : false }));
+// CSP: off in dev (it blocks Vite's live-reload). In production we keep
+// helmet's protections but allow the jsDelivr CDN — the camera scanner
+// (html5-qrcode) and the barcode/QR label generators load from there at
+// runtime, and the default CSP ('self' only) would block them.
+app.use(
+  helmet({
+    contentSecurityPolicy: isProduction
+      ? {
+          useDefaults: true,
+          directives: {
+            "script-src": ["'self'", "https://cdn.jsdelivr.net"],
+            "connect-src": ["'self'", "https://cdn.jsdelivr.net"],
+            "img-src": ["'self'", "data:", "blob:"],
+            "media-src": ["'self'", "blob:"], // camera stream
+            "worker-src": ["'self'", "blob:"], // scanner decode worker
+          },
+        }
+      : false,
+  })
+);
 app.use(cors({ origin: env.CLIENT_ORIGIN, credentials: true })); // dev: allow the React dev server
 app.use(express.json()); // parse JSON request bodies into req.body
 
