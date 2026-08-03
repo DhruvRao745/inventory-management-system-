@@ -253,55 +253,6 @@ export function ProductsPage() {
     }
   }
 
-  // Open a print window of scannable Code128 labels for every product that
-  // has a barcode. JsBarcode is loaded from a CDN inside that window (so we
-  // don't add a bundle dependency just for printing).
-  function printBarcodes() {
-    const withCodes = products.filter((p) => p.barcode);
-    if (withCodes.length === 0) {
-      setError("No products have a barcode yet — add or generate one first.");
-      return;
-    }
-    const labels = withCodes
-      .map(
-        (p) => `<div class="label">
-          <div class="name">${p.name}</div>
-          <canvas class="qr" data-code="${p.barcode}"></canvas>
-          <svg class="bc" data-code="${p.barcode}"></svg>
-          <div class="sku">${p.sku}</div>
-        </div>`
-      )
-      .join("");
-    const html = `<!doctype html><html><head><title>Barcodes</title>
-      <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>
-      <script src="https://cdn.jsdelivr.net/npm/qrcode@1.5.4/build/qrcode.min.js"><\/script>
-      <style>
-        body{font-family:Arial,sans-serif;margin:0;padding:12px}
-        .grid{display:grid;grid-template-columns:repeat(3,1fr);gap:10px}
-        .label{border:1px solid #ddd;border-radius:6px;padding:8px;text-align:center;page-break-inside:avoid}
-        .name{font-size:12px;font-weight:bold;margin-bottom:4px}
-        .sku{font-size:10px;color:#666}
-        .qr{width:96px;height:96px}
-        .bc{width:100%;margin-top:4px}
-      </style></head><body>
-      <div class="grid">${labels}</div>
-      <script>
-        window.onload=function(){
-          document.querySelectorAll('.qr').forEach(function(el){
-            try{QRCode.toCanvas(el, el.getAttribute('data-code'), {width:96,margin:1});}catch(e){}
-          });
-          document.querySelectorAll('.bc').forEach(function(el){
-            try{JsBarcode(el, el.getAttribute('data-code'), {format:'CODE128',height:36,fontSize:11,margin:4});}catch(e){}
-          });
-          setTimeout(function(){window.print();},500);
-        };
-      <\/script></body></html>`;
-    const w = window.open("", "_blank", "width=900,height=700");
-    if (!w) return;
-    w.document.write(html);
-    w.document.close();
-  }
-
   async function handleSubmit(e: FormEvent) {
     e.preventDefault();
     setFormError(null);
@@ -450,13 +401,6 @@ export function ProductsPage() {
               className="text-sm font-bold text-[var(--muted)] underline hover:text-[var(--text)]"
             >
               Manage categories
-            </button>
-            <button
-              type="button"
-              onClick={printBarcodes}
-              className="text-sm font-bold text-[var(--muted)] underline hover:text-[var(--text)]"
-            >
-              Print barcodes
             </button>
             <button
               type="button"

@@ -9,6 +9,7 @@ import { formatMoney } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { ErrorAlert, cardClass, SectionTitle } from "../components/ui";
 import { PoRefLink } from "../components/PoRefLink";
+import { BarcodeView } from "../components/BarcodeView";
 import { TYPE_COLORS } from "../lib/colors";
 
 type MovementsResponse = { items: StockMovement[]; total: number };
@@ -72,6 +73,30 @@ export function ProductDetailPage() {
   const marginAmount = selling - cost;
   const marginPct =
     selling > 0 ? Math.round((marginAmount / selling) * 100) : null;
+
+  // Print a single label for THIS product (QR + Code128) in a new window.
+  function printBarcode() {
+    if (!product?.barcode) return;
+    const code = JSON.stringify(product.barcode);
+    const html = `<!doctype html><html><head><title>${product.sku}</title>
+      <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>
+      <style>
+        body{font-family:Arial,sans-serif;text-align:center;padding:24px}
+        .name{font-weight:bold;font-size:16px;margin-bottom:8px}
+        .sku{color:#666;font-size:12px;margin-top:6px}
+      </style></head><body>
+      <div class="name">${product.name}</div>
+      <svg id="bc"></svg>
+      <div class="sku">${product.sku}</div>
+      <script>window.onload=function(){
+        try{JsBarcode('#bc', ${code}, {format:'CODE128',height:60,fontSize:14,margin:6});}catch(e){}
+        setTimeout(function(){window.print();},400);
+      };<\/script></body></html>`;
+    const w = window.open("", "_blank", "width=480,height=520");
+    if (!w) return;
+    w.document.write(html);
+    w.document.close();
+  }
 
   return (
     <div className="max-w-3xl space-y-8">
@@ -168,6 +193,31 @@ export function ProductDetailPage() {
             </div>
           </div>
         </div>
+      </div>
+
+      {/* Barcode */}
+      <div className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <SectionTitle>Barcode</SectionTitle>
+          {product.barcode && (
+            <button
+              type="button"
+              onClick={printBarcode}
+              className="rounded-[5px] border-2 border-[var(--line)] bg-[var(--card)] px-3 py-1 text-xs font-bold text-[var(--text)] shadow-[2px_2px_0px_var(--shadow)] hover:bg-[var(--hover)]"
+            >
+              🖨 Print label
+            </button>
+          )}
+        </div>
+        {product.barcode ? (
+          <div className={`${cardClass} p-5`}>
+            <BarcodeView value={product.barcode} />
+          </div>
+        ) : (
+          <div className={`${cardClass} p-6 text-sm font-bold text-[var(--muted)]`}>
+            No barcode yet — add or generate one by editing this product.
+          </div>
+        )}
       </div>
 
       {/* Per-location stock */}
