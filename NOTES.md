@@ -122,6 +122,13 @@ Repo: private GitHub (`DhruvRao745`), auto-deploys to Render on push to `main`.
 - Workspace bin not hoisted in Docker (run prisma from `server/`).
 - Utility-clash pair: sidebar switch positioning, invisible button text.
 
+## 🧩 Onboarding
+- `SETUP.md` (added) — collaborator local-setup guide. Key point: each dev runs
+  their OWN local Postgres (Docker `docker compose up -d`); schema from Prisma
+  migrations, demo data from `prisma db seed` (demo@demo.com / demo1234).
+  `server/.env` is git-ignored → collaborator copies it from `.env.example`.
+  Never share Render production DB creds.
+
 ## 🔜 Next
 
 1. Senior's verdict on Dashboard v2 → commit or adjust.
