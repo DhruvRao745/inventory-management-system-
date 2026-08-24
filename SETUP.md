@@ -147,4 +147,3 @@ inventory/
   docker-compose.yml Local PostgreSQL for development
   package.json       npm workspace root (scripts: dev, build, test)
 ```
-dhruv
