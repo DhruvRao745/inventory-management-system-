@@ -8,6 +8,7 @@ export const createProductSchema = z.object({
   barcode: z.string().trim().optional(), // scannable code (B1)
   name: z.string().trim().min(2, "Name is too short"),
   description: z.string().trim().optional(),
+  hsnCode: z.string().trim().max(20).optional(),
   categoryId: z.string().optional(),
   preferredSupplierId: z.string().optional(),
   unit: z.string().trim().min(1).default("pcs"),

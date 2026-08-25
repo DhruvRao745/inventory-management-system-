@@ -32,6 +32,7 @@ const emptyForm = {
   barcode: "",
   name: "",
   description: "",
+  hsnCode: "",
   categoryId: "",
   preferredSupplierId: "",
   unit: "pcs",
@@ -189,6 +190,7 @@ export function ProductsPage() {
       barcode: p.barcode ?? "",
       name: p.name,
       description: p.description ?? "",
+      hsnCode: p.hsnCode ?? "",
       categoryId: p.categoryId ?? "",
       preferredSupplierId: p.preferredSupplierId ?? "",
       unit: p.unit,
@@ -262,6 +264,7 @@ export function ProductsPage() {
       barcode: form.barcode || undefined,
       name: form.name,
       description: form.description || undefined,
+      hsnCode: form.hsnCode || undefined,
       categoryId: form.categoryId,
       preferredSupplierId: form.preferredSupplierId,
       unit: form.unit,
@@ -663,12 +666,21 @@ export function ProductsPage() {
                 onChange={(e) => setField("name", e.target.value)}
               />
             </Field>
-            <Field label="Description" hint="optional">
-              <Input
-                value={form.description}
-                onChange={(e) => setField("description", e.target.value)}
-              />
-            </Field>
+            <div className="grid grid-cols-2 gap-4">
+              <Field label="Description" hint="optional">
+                <Input
+                  value={form.description}
+                  onChange={(e) => setField("description", e.target.value)}
+                />
+              </Field>
+              <Field label="HSN / SAC code" hint="for GST invoices — optional">
+                <Input
+                  value={form.hsnCode}
+                  onChange={(e) => setField("hsnCode", e.target.value)}
+                  placeholder="e.g. 8711"
+                />
+              </Field>
+            </div>
             <Field label="Category" hint="optional">
               <Select
                 value={form.categoryId}

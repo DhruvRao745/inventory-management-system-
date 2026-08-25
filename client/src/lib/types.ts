@@ -15,6 +15,7 @@ export type Product = {
   barcode: string | null;
   name: string;
   description: string | null;
+  hsnCode: string | null;
   categoryId: string | null;
   category: Category | null;
   preferredSupplierId: string | null;
@@ -127,7 +128,13 @@ export type InvoiceLine = {
   productId: string;
   quantity: number;
   unitPrice: string;
-  product: { id: string; sku: string; name: string; unit: string };
+  product: {
+    id: string;
+    sku: string;
+    name: string;
+    unit: string;
+    hsnCode: string | null;
+  };
 };
 
 export type Invoice = {
@@ -138,6 +145,7 @@ export type Invoice = {
   customerName: string;
   customerPhone: string | null;
   customerAddress: string | null;
+  customerGstin: string | null;
   notes: string | null;
   taxRate: string | null;
   discount: string | null;

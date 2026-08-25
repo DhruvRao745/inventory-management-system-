@@ -25,6 +25,15 @@ model Company {
   id        String   @id @default(cuid())
   name      String
   currency  String   @default("INR") // ISO code: INR, USD, EUR...
+  // Business details — shown on invoices (the "From" block). All optional so
+  // existing companies keep working; the invoice simply omits blank lines.
+  address   String? // full business address block
+  phone     String?
+  email     String?
+  gstin        String? // GST registration number (India)
+  pan          String? // PAN — the business tax ID
+  sealText     String? // one line inside the round stamp, e.g. "For Demo Traders"
+  invoiceTerms String? // terms & conditions printed on invoices (one per line)
   createdAt DateTime @default(now())
   updatedAt DateTime @updatedAt
 
@@ -195,6 +204,7 @@ model Invoice {
   customerName    String // snapshot — always kept even if unlinked
   customerPhone   String?
   customerAddress String?
+  customerGstin   String? // buyer's GST — snapshot, for B2B invoices
   notes           String?
   taxRate         Decimal? @db.Decimal(5, 2) // % applied after discount (A3)
   discount        Decimal? @db.Decimal(12, 2) // flat amount off the subtotal (A3)
@@ -272,6 +282,7 @@ model Product {
   barcode           String?  // scannable code (Code128); generated, unique per company (B1)
   name              String
   description       String?
+  hsnCode           String?  // HSN/SAC tax code, printed per line on GST invoices
   categoryId          String?
   preferredSupplierId String? // usual vendor for this item (Phase 4)
   unit              String   @default("pcs") // pcs, kg, litre... configurable per product

@@ -46,6 +46,14 @@ export function SettingsPage() {
   // --- company card ---
   const [coName, setCoName] = useState(company?.name ?? "");
   const [coCurrency, setCoCurrency] = useState(company?.currency ?? "INR");
+  // Business details shown on invoices (the "From" block + seal).
+  const [coAddress, setCoAddress] = useState(company?.address ?? "");
+  const [coPhone, setCoPhone] = useState(company?.phone ?? "");
+  const [coEmail, setCoEmail] = useState(company?.email ?? "");
+  const [coGstin, setCoGstin] = useState(company?.gstin ?? "");
+  const [coPan, setCoPan] = useState(company?.pan ?? "");
+  const [coSeal, setCoSeal] = useState(company?.sealText ?? "");
+  const [coTerms, setCoTerms] = useState(company?.invoiceTerms ?? "");
   const [coError, setCoError] = useState<string | null>(null);
   const [coOk, setCoOk] = useState(false);
 
@@ -56,7 +64,18 @@ export function SettingsPage() {
     try {
       await api("/company", {
         method: "PATCH",
-        body: { name: coName, currency: coCurrency },
+        body: {
+          name: coName,
+          currency: coCurrency,
+          // Send "" for cleared fields; the server turns that into null.
+          address: coAddress,
+          phone: coPhone,
+          email: coEmail,
+          gstin: coGstin,
+          pan: coPan,
+          sealText: coSeal,
+          invoiceTerms: coTerms,
+        },
       });
       await refreshMe();
       setCoOk(true);
@@ -205,41 +224,114 @@ export function SettingsPage() {
       {isAdmin && (
         <div className="space-y-3">
           <SectionTitle>Company</SectionTitle>
-          <form
-            onSubmit={saveCompany}
-            className={`${cardClass} flex flex-wrap items-end gap-4 p-5`}
-          >
-            <div className="min-w-48 flex-1">
-              <Field label="Company name">
-                <Input
-                  required
-                  minLength={2}
-                  value={coName}
-                  onChange={(e) => setCoName(e.target.value)}
-                />
+          <form onSubmit={saveCompany} className={`${cardClass} space-y-4 p-5`}>
+            <div className="flex flex-wrap items-end gap-4">
+              <div className="min-w-48 flex-1">
+                <Field label="Company name">
+                  <Input
+                    required
+                    minLength={2}
+                    value={coName}
+                    onChange={(e) => setCoName(e.target.value)}
+                  />
+                </Field>
+              </div>
+              <Field label="Currency">
+                <Select
+                  value={coCurrency}
+                  onChange={(e) => setCoCurrency(e.target.value)}
+                >
+                  {CURRENCIES.map((c) => (
+                    <option key={c} value={c}>
+                      {c}
+                    </option>
+                  ))}
+                </Select>
               </Field>
             </div>
-            <Field label="Currency">
-              <Select
-                value={coCurrency}
-                onChange={(e) => setCoCurrency(e.target.value)}
-              >
-                {CURRENCIES.map((c) => (
-                  <option key={c} value={c}>
-                    {c}
-                  </option>
-                ))}
-              </Select>
-            </Field>
-            <Button type="submit">Save</Button>
-            {coOk && (
-              <span className="text-sm font-bold text-emerald-500">
-                Saved ✓
-              </span>
-            )}
-            {coError && (
-              <span className="text-sm font-bold text-red-500">{coError}</span>
-            )}
+
+            {/* Business details — printed on invoices as the "From" block. */}
+            <div className="border-t-2 border-[var(--line)]/20 pt-4">
+              <p className="mb-3 text-xs font-bold uppercase tracking-wide text-[var(--muted)]">
+                Business details (shown on invoices)
+              </p>
+              <div className="space-y-4">
+                <Field label="Address" hint="optional">
+                  <Input
+                    value={coAddress}
+                    placeholder="Shop 12, MI Road, Jaipur, Rajasthan 302001"
+                    onChange={(e) => setCoAddress(e.target.value)}
+                  />
+                </Field>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field label="Phone" hint="optional">
+                    <Input
+                      value={coPhone}
+                      onChange={(e) => setCoPhone(e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Email" hint="optional">
+                    <Input
+                      type="email"
+                      value={coEmail}
+                      onChange={(e) => setCoEmail(e.target.value)}
+                    />
+                  </Field>
+                </div>
+                <div className="grid gap-4 sm:grid-cols-2">
+                  <Field label="GSTIN" hint="optional">
+                    <Input
+                      value={coGstin}
+                      placeholder="22AAAAA0000A1Z5"
+                      onChange={(e) => setCoGstin(e.target.value.toUpperCase())}
+                    />
+                  </Field>
+                  <Field label="PAN" hint="optional">
+                    <Input
+                      value={coPan}
+                      placeholder="AAAAA0000A"
+                      onChange={(e) => setCoPan(e.target.value.toUpperCase())}
+                    />
+                  </Field>
+                </div>
+                <Field
+                  label="Seal text"
+                  hint="one line inside the round stamp — e.g. For Demo Traders"
+                >
+                  <Input
+                    value={coSeal}
+                    placeholder="For Demo Traders"
+                    onChange={(e) => setCoSeal(e.target.value)}
+                  />
+                </Field>
+                <Field
+                  label="Invoice terms & conditions"
+                  hint="one per line — printed at the bottom of every invoice"
+                >
+                  <textarea
+                    value={coTerms}
+                    onChange={(e) => setCoTerms(e.target.value)}
+                    rows={4}
+                    placeholder={
+                      "Goods once sold will not be taken back.\nWarranty as per manufacturer terms.\nSubject to Jaipur jurisdiction."
+                    }
+                    className="w-full resize-y rounded-[5px] border-2 border-[var(--line)] bg-[var(--card)] px-3 py-2 text-sm font-semibold text-[var(--text)] shadow-[3px_3px_0px_var(--shadow)] focus:outline-none"
+                  />
+                </Field>
+              </div>
+            </div>
+
+            <div className="flex items-center gap-4">
+              <Button type="submit">Save</Button>
+              {coOk && (
+                <span className="text-sm font-bold text-emerald-500">
+                  Saved ✓
+                </span>
+              )}
+              {coError && (
+                <span className="text-sm font-bold text-red-500">{coError}</span>
+              )}
+            </div>
           </form>
         </div>
       )}

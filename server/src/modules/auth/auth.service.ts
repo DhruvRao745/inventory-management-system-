@@ -53,6 +53,35 @@ function publicUser(user: {
   };
 }
 
+// One shape for the company object every auth response returns, so register,
+// login and /me can't drift. Business-detail fields ride along so the invoice
+// (which reads company from context) has them without a second request.
+function publicCompany(company: {
+  id: string;
+  name: string;
+  currency: string;
+  address?: string | null;
+  phone?: string | null;
+  email?: string | null;
+  gstin?: string | null;
+  pan?: string | null;
+  sealText?: string | null;
+  invoiceTerms?: string | null;
+}) {
+  return {
+    id: company.id,
+    name: company.name,
+    currency: company.currency,
+    address: company.address ?? null,
+    phone: company.phone ?? null,
+    email: company.email ?? null,
+    gstin: company.gstin ?? null,
+    pan: company.pan ?? null,
+    sealText: company.sealText ?? null,
+    invoiceTerms: company.invoiceTerms ?? null,
+  };
+}
+
 /**
  * New company signs up. Three rows must be born TOGETHER:
  * the Company, its default Location, and the first ADMIN user.
@@ -106,11 +135,7 @@ export async function register(input: RegisterInput) {
   return {
     ...tokens,
     user: publicUser(result.user),
-    company: {
-      id: result.company.id,
-      name: result.company.name,
-      currency: result.company.currency,
-    },
+    company: publicCompany(result.company),
   };
 }
 
@@ -139,11 +164,7 @@ export async function login(input: LoginInput) {
   return {
     ...tokens,
     user: publicUser(user),
-    company: {
-      id: user.company.id,
-      name: user.company.name,
-      currency: user.company.currency,
-    },
+    company: publicCompany(user.company),
   };
 }
 
@@ -190,10 +211,6 @@ export async function getMe(userId: string) {
   }
   return {
     user: publicUser(user),
-    company: {
-      id: user.company.id,
-      name: user.company.name,
-      currency: user.company.currency,
-    },
+    company: publicCompany(user.company),
   };
 }

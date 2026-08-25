@@ -144,3 +144,100 @@ Suppliers/POs · low-stock email/WhatsApp alerts · barcode scanning ·
 batch/expiry tracking · invoicing · audit log viewer · searchable
 product pickers (500+ SKUs) · Google sign-in · subscription billing ·
 custom domain + paid hosting before first real customer.
+
+---
+
+## Invoice redesign + business details (25 Aug)
+
+Reworked the printed invoice (`InvoiceDetailPage.printInvoice`) from a plain
+text layout into a professional bordered document, and added the company/buyer
+data it needs to look official.
+
+**New DB fields** (migration `20260825120000_add_business_details`):
+- `Company`: `address`, `phone`, `email`, `gstin`, `pan`, `sealText` — all optional.
+- `Invoice`: `customerGstin` — buyer's GST snapshot for B2B invoices.
+
+⚠️ **Run once locally to apply:** `cd server && npx prisma migrate dev` (this
+also regenerates the Prisma client). Until then, `tsc` shows 2 expected errors in
+`inv.service.ts` about `customerGstin` — they're purely the stale generated client,
+not real bugs; they vanish after generate. Same class of issue as Shivaay's `tx` error.
+
+**Wiring:**
+- `company.routes.ts` — GET + PATCH now carry the new fields; blank string → null
+  (so a cleared field prints nothing). Shared `companySelect` so GET/PATCH can't drift.
+- `auth.service.ts` — added a `publicCompany()` helper used by register/login/getMe,
+  so the company object (with business details) rides along on every auth response.
+  The invoice reads company from context — no extra request.
+- `AuthContext.Company` type + `Invoice` type gained the new fields.
+- Settings page: a "Business details" block under Company (address, phone, email,
+  GSTIN, PAN, seal text). GSTIN/PAN auto-uppercase.
+- Invoice form: a "Customer GSTIN" field.
+
+**The printed invoice now has:**
+- Big "INVOICE" wordmark top-left; a scannable **Code128 barcode** of the invoice
+  number top-right (same jsbarcode pattern as the product labels — their scan station
+  reads it). Chose a barcode over the reference's QR because their scanner already
+  reads Code128.
+- **From / Bill To** two-column block: seller (name, address, phone, email, GSTIN, PAN)
+  and buyer (name, address, phone, GSTIN). Blank lines are omitted, not printed empty.
+- Meta strip (date, location, colored status pill).
+- Item table with row numbers, zebra striping, unit next to qty.
+- A generated round **rubber-stamp seal** (double blue border, rotated, "For <company>"
+  / "Authorised Signatory") — text customizable via the `sealText` setting. No image
+  upload needed.
+- Boxed totals with the grand total inverted (white on dark).
+
+**Decisions:**
+- **Aadhaar deliberately left out.** It's sensitive personal ID; UIDAI discourages
+  printing it publicly. PAN + GST are the correct/expected business IDs on an invoice.
+- **Logo deferred** — needs image upload/hosting (this project has none set up). Seal
+  is generated from text instead, so it shipped now.
+- HTML-escaping added on all free-text (was missing before — a product named with a
+  `<` would have broken the print). Print fires from `window.onload` after the barcode
+  renders, matching the product-label popup pattern.
+
+Client `tsc` clean. Server `tsc` clean except the 2 stale-client errors noted above.
+
+## GST tax-invoice format (25 Aug, same day, second pass)
+
+User shared a real dealer invoice (Vedika Automobiles / Revolt) and wanted "this
+type". Rebuilt the print again into a **fully-bordered Indian GST tax invoice**.
+Adapted the *format*, not the vehicle-specific columns (chassis/motor/battery/
+colour/variant don't map to generic products).
+
+**New DB fields** (migration `20260825140000_gst_invoice_fields`):
+- `Product.hsnCode` — HSN/SAC tax code, printed per line.
+- `Company.invoiceTerms` — T&C text (one per line), printed on every invoice.
+
+⚠️ **Two migrations now pending on the real machine.** Run once:
+`cd server && npx prisma migrate dev` — applies both `20260825120000_add_business_details`
+and `20260825140000_gst_invoice_fields`, and regenerates the client. (The DB columns
+don't exist until this runs, so issuing an invoice would fail at runtime otherwise,
+even though `tsc` is currently clean.)
+
+**Wiring:** product schema/form gained `hsnCode` (input next to Description);
+invoice line `include` selects it; Settings gained an "Invoice terms & conditions"
+textarea; `Company.invoiceTerms` flows through `companySelect` + `publicCompany` like
+the other business fields.
+
+**The printed invoice now matches the reference:**
+- Full outer border with ruled cells throughout.
+- Company name + address top-left, Code128 barcode of the invoice no. top-right.
+- Seller detail grid (Phone / GSTIN / Email / PAN) in `label : value` rows.
+- Centered `* Tax Invoice *` band.
+- Two-column customer / invoice-meta block (name, address, phone | GSTIN, no., date,
+  location, status).
+- Item table with **Sr. / Item / HSN / Qty / Rate / Amount**.
+- **CGST + SGST split** — the single tax rate shown as two half-rate lines (intra-state
+  GST norm), plus a **Round off** line to the nearest rupee.
+- **Amount in words** (new `amountInWords()` helper — Indian lakh/crore numbering,
+  currency-aware: Rupees/Paise, Dollars/Cents, etc.).
+- **Terms & Conditions** numbered list (from the `invoiceTerms` setting, with a default).
+- **Signature blocks**: Customer Signature (left) | company name + generated round seal
+  + Authorised Signatory (right).
+- "Thank you for your business" footer.
+
+`amountInWords` lives at module scope in `InvoiceDetailPage.tsx` (ONES/TENS →
+twoDigits → threeDigits → integerToWords with crore/lakh/thousand, + a currency-word map).
+
+Client + server `tsc` both clean.

@@ -34,7 +34,9 @@ const invInclude = {
   createdBy: { select: { id: true, name: true } },
   lines: {
     include: {
-      product: { select: { id: true, sku: true, name: true, unit: true } },
+      product: {
+        select: { id: true, sku: true, name: true, unit: true, hsnCode: true },
+      },
     },
   },
 } as const;
@@ -94,6 +96,7 @@ export async function createInvoice(
         customerName: input.customerName,
         customerPhone: input.customerPhone,
         customerAddress: input.customerAddress,
+        customerGstin: input.customerGstin,
         notes: input.notes,
         taxRate: input.taxRate ?? null,
         discount: input.discount ?? null,
@@ -205,6 +208,8 @@ export async function updateInvoice(
           input.customerAddress === undefined
             ? undefined
             : input.customerAddress,
+        customerGstin:
+          input.customerGstin === undefined ? undefined : input.customerGstin,
         notes: input.notes === undefined ? undefined : input.notes,
         taxRate: input.taxRate === undefined ? undefined : input.taxRate,
         discount: input.discount === undefined ? undefined : input.discount,

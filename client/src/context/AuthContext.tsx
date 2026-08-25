@@ -30,7 +30,18 @@ export type User = {
   role: "ADMIN" | "MANAGER" | "STAFF";
   companyId: string;
 };
-export type Company = { id: string; name: string; currency: string };
+export type Company = {
+  id: string;
+  name: string;
+  currency: string;
+  address: string | null;
+  phone: string | null;
+  email: string | null;
+  gstin: string | null;
+  pan: string | null;
+  sealText: string | null;
+  invoiceTerms: string | null;
+};
 
 type AuthResponse = {
   token: string;

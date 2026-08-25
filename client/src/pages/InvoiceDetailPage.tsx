@@ -26,6 +26,64 @@ import {
 type LineDraft = { productId: string; quantity: string; unitPrice: string };
 const emptyLine: LineDraft = { productId: "", quantity: "1", unitPrice: "" };
 
+// --- amount in words (Indian numbering: thousand / lakh / crore) ---
+// Used on the printed invoice, e.g. 127990 → "One Lakh Twenty Seven Thousand
+// Nine Hundred Ninety". Kept generic so the currency name is passed in.
+const ONES = [
+  "", "One", "Two", "Three", "Four", "Five", "Six", "Seven", "Eight", "Nine",
+  "Ten", "Eleven", "Twelve", "Thirteen", "Fourteen", "Fifteen", "Sixteen",
+  "Seventeen", "Eighteen", "Nineteen",
+];
+const TENS = [
+  "", "", "Twenty", "Thirty", "Forty", "Fifty", "Sixty", "Seventy", "Eighty", "Ninety",
+];
+
+function twoDigits(n: number): string {
+  if (n < 20) return ONES[n];
+  return `${TENS[Math.floor(n / 10)]}${n % 10 ? " " + ONES[n % 10] : ""}`;
+}
+
+function threeDigits(n: number): string {
+  const h = Math.floor(n / 100);
+  const rest = n % 100;
+  return `${h ? ONES[h] + " Hundred" + (rest ? " " : "") : ""}${
+    rest ? twoDigits(rest) : ""
+  }`;
+}
+
+// Whole-number part in the Indian system (…, crore, lakh, thousand, hundred).
+function integerToWords(n: number): string {
+  if (n === 0) return "Zero";
+  const crore = Math.floor(n / 10000000);
+  const lakh = Math.floor((n % 10000000) / 100000);
+  const thousand = Math.floor((n % 100000) / 1000);
+  const rest = n % 1000;
+  const parts: string[] = [];
+  if (crore) parts.push(`${integerToWords(crore)} Crore`);
+  if (lakh) parts.push(`${twoDigits(lakh)} Lakh`);
+  if (thousand) parts.push(`${twoDigits(thousand)} Thousand`);
+  if (rest) parts.push(threeDigits(rest));
+  return parts.join(" ");
+}
+
+const CURRENCY_WORDS: Record<string, [string, string]> = {
+  INR: ["Rupees", "Paise"],
+  USD: ["Dollars", "Cents"],
+  EUR: ["Euros", "Cents"],
+  GBP: ["Pounds", "Pence"],
+  AED: ["Dirhams", "Fils"],
+  SGD: ["Dollars", "Cents"],
+};
+
+function amountInWords(amount: number, currency = "INR"): string {
+  const [major, minor] = CURRENCY_WORDS[currency] ?? [currency, "Cents"];
+  const whole = Math.floor(amount);
+  const frac = Math.round((amount - whole) * 100);
+  const main = `${integerToWords(whole)} ${major}`;
+  const paise = frac ? ` and ${twoDigits(frac)} ${minor}` : "";
+  return `${main}${paise} Only`;
+}
+
 export function InvoiceDetailPage() {
   const { id } = useParams<{ id: string }>();
   const isNew = !id;
@@ -45,6 +103,7 @@ export function InvoiceDetailPage() {
   const [customerName, setCustomerName] = useState("");
   const [customerPhone, setCustomerPhone] = useState("");
   const [customerAddress, setCustomerAddress] = useState("");
+  const [customerGstin, setCustomerGstin] = useState("");
   const [notes, setNotes] = useState("");
   const [taxRate, setTaxRate] = useState("");
   const [discount, setDiscount] = useState("");
@@ -76,6 +135,7 @@ export function InvoiceDetailPage() {
           setCustomerName(loaded.customerName);
           setCustomerPhone(loaded.customerPhone ?? "");
           setCustomerAddress(loaded.customerAddress ?? "");
+          setCustomerGstin(loaded.customerGstin ?? "");
           setNotes(loaded.notes ?? "");
           setTaxRate(loaded.taxRate ?? "");
           setDiscount(loaded.discount ?? "");
@@ -157,6 +217,7 @@ export function InvoiceDetailPage() {
       customerName,
       customerPhone: customerPhone || undefined,
       customerAddress: customerAddress || undefined,
+      customerGstin: customerGstin || undefined,
       notes: notes || undefined,
       taxRate: taxRate ? Number(taxRate) : undefined,
       discount: discount ? Number(discount) : undefined,
@@ -190,63 +251,253 @@ export function InvoiceDetailPage() {
 
   function printInvoice() {
     if (!inv) return;
+
+    // Guard against HTML injection from free-text fields (customer name/address,
+    // notes, product names). Without this, a product literally named
+    // "<script>" would break the printed document.
+    const esc = (s: string | number | null | undefined) =>
+      String(s ?? "").replace(
+        /[&<>"']/g,
+        (c) =>
+          ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;", "'": "&#39;" })[
+            c
+          ] as string,
+      );
+
+    const issued = new Date(inv.issuedAt ?? inv.createdAt);
+    const statusColor =
+      inv.status === "PAID"
+        ? "#059669"
+        : inv.status === "CANCELLED"
+          ? "#dc2626"
+          : "#2d8cf0";
+
+    const ref = invNumber(inv.number);
+    const cur = currency ?? "INR";
+
+    // One row of a label:value detail block; skips itself if the value is blank.
+    const kv = (label: string, value?: string | null) =>
+      `<tr><td class="k">${label}</td><td class="c">:</td><td class="v">${
+        value ? esc(value) : "—"
+      }</td></tr>`;
+
     const rows = inv.lines
       .map(
-        (l) => `<tr>
-          <td>${l.product.name} <small>${l.product.sku}</small></td>
-          <td style="text-align:right">${l.quantity}</td>
-          <td style="text-align:right">${formatMoney(Number(l.unitPrice), currency)}</td>
-          <td style="text-align:right">${formatMoney(Number(l.unitPrice) * l.quantity, currency)}</td>
-        </tr>`
+        (l, i) => `<tr>
+          <td class="c">${i + 1}</td>
+          <td><span class="pname">${esc(l.product.name)}</span>
+            <span class="psku">${esc(l.product.sku)}</span></td>
+          <td class="c">${l.product.hsnCode ? esc(l.product.hsnCode) : "—"}</td>
+          <td class="r">${l.quantity} ${esc(l.product.unit)}</td>
+          <td class="r">${formatMoney(Number(l.unitPrice), cur)}</td>
+          <td class="r b">${formatMoney(Number(l.unitPrice) * l.quantity, cur)}</td>
+        </tr>`,
       )
       .join("");
-    const html = `<!doctype html><html><head><title>${invNumber(inv.number)}</title>
+
+    // CGST + SGST split — half the rate each, for a sale within one state.
+    const halfRate = bill.taxRate / 2;
+    const halfTax = bill.taxAmt / 2;
+    const roundedTotal = Math.round(bill.total);
+    const roundOff = roundedTotal - bill.total;
+
+    const tRow = (label: string, value: string, opts: { grand?: boolean } = {}) =>
+      `<tr class="${opts.grand ? "grand" : ""}">
+        <td class="tl">${label}</td><td class="tv">${value}</td>
+      </tr>`;
+
+    // Terms: split the setting on newlines into a numbered list; fall back to
+    // a sensible default so the block is never empty.
+    const termsText =
+      company?.invoiceTerms ||
+      "Goods once sold will not be taken back or exchanged.\nAll disputes subject to local jurisdiction.";
+    const terms = termsText
+      .split(/\r?\n/)
+      .map((t) => t.trim())
+      .filter(Boolean)
+      .map((t) => `<li>${esc(t)}</li>`)
+      .join("");
+
+    const sealTop = esc(company?.sealText || `For ${company?.name ?? "Company"}`);
+
+    const html = `<!doctype html><html><head><meta charset="utf-8"><title>${ref} — ${esc(
+      company?.name ?? "Invoice",
+    )}</title>
       <style>
-        body{font-family:Arial,sans-serif;color:#111;padding:32px;max-width:720px;margin:auto}
-        h1{margin:0 0 4px} .muted{color:#666;font-size:13px}
-        table{width:100%;border-collapse:collapse;margin-top:24px}
-        th,td{padding:8px;border-bottom:1px solid #ddd;font-size:14px;text-align:left}
-        th{text-transform:uppercase;font-size:11px;color:#666}
-        tfoot td{font-weight:bold;border-top:2px solid #111;border-bottom:none}
-        small{color:#888}
+        *{box-sizing:border-box;margin:0;padding:0}
+        body{font-family:'Segoe UI',Arial,sans-serif;color:#111;background:#eceef1;
+          padding:24px;-webkit-print-color-adjust:exact;print-color-adjust:exact}
+        .sheet{max-width:820px;margin:auto;background:#fff;border:1.5px solid #111}
+        .pad{padding:14px 18px}
+        /* header */
+        .top{display:flex;justify-content:space-between;align-items:flex-start;
+          border-bottom:1.5px solid #111}
+        .top .co{padding:14px 18px}
+        .co .co-name{font-size:24px;font-weight:800;letter-spacing:-.3px;text-transform:uppercase}
+        .co .co-addr{font-size:11px;color:#333;margin-top:3px;max-width:340px;line-height:1.4}
+        .top .bc{padding:14px 18px;text-align:right}
+        .bc svg{max-width:180px}
+        .bc .no{font-size:12px;font-weight:800;margin-top:2px;letter-spacing:1px}
+        /* seller details grid */
+        .sdet{border-bottom:1.5px solid #111;padding:8px 18px}
+        table.kv{border-collapse:collapse}
+        table.kv td{font-size:11.5px;padding:1.5px 0;vertical-align:top}
+        table.kv .k{color:#555;width:120px;font-weight:600}
+        table.kv .c{color:#555;width:14px;text-align:center}
+        table.kv .v{font-weight:600}
+        /* tax invoice band */
+        .band{text-align:center;font-size:15px;font-weight:800;letter-spacing:2px;
+          padding:6px;border-bottom:1.5px solid #111;text-transform:uppercase}
+        .band .star{color:#999;margin:0 8px}
+        /* customer + meta two columns */
+        .cust{display:flex;border-bottom:1.5px solid #111}
+        .cust .col{flex:1;padding:10px 18px}
+        .cust .col+.col{border-left:1.5px solid #111}
+        /* items */
+        table.items{width:100%;border-collapse:collapse}
+        table.items th{font-size:10px;text-transform:uppercase;letter-spacing:.5px;
+          background:#f0f1f3;border:1px solid #111;padding:7px 8px;font-weight:800}
+        table.items td{border:1px solid #ccc;border-left:1px solid #111;border-right:1px solid #111;
+          padding:8px;font-size:12px}
+        table.items .c{text-align:center}
+        table.items .r{text-align:right;white-space:nowrap}
+        table.items .b{font-weight:800}
+        .pname{font-weight:700;display:block}
+        .psku{font-size:10px;color:#888}
+        /* terms + totals split */
+        .split{display:flex;border-bottom:1.5px solid #111}
+        .split .terms{flex:1;padding:10px 18px;border-right:1.5px solid #111}
+        .terms h4{font-size:10px;text-transform:uppercase;letter-spacing:1px;color:#555;margin-bottom:5px}
+        .terms ol{margin:0;padding-left:16px}
+        .terms li{font-size:10.5px;color:#333;line-height:1.5;margin-bottom:2px}
+        .split .sums{width:300px}
+        table.sums{width:100%;border-collapse:collapse}
+        table.sums td{font-size:12px;padding:6px 12px;border-bottom:1px solid #e0e0e0}
+        table.sums .tl{color:#333}
+        table.sums .tv{text-align:right;font-weight:600;white-space:nowrap}
+        table.sums .grand td{background:#111;color:#fff;font-weight:800;font-size:14px}
+        /* words */
+        .words{padding:8px 18px;border-bottom:1.5px solid #111;font-size:12px}
+        .words b{font-weight:800}
+        /* signatures */
+        .sign{display:flex;min-height:120px}
+        .sign .s{flex:1;padding:14px 18px;display:flex;flex-direction:column;justify-content:space-between}
+        .sign .s+.s{border-left:1.5px solid #111;text-align:right;align-items:flex-end}
+        .sign .lbl{font-size:11px;color:#555;font-weight:600}
+        .sign .co2{font-size:11px;font-weight:800;text-transform:uppercase}
+        .seal{width:112px;height:112px;border:2.5px double #1f3a8a;border-radius:50%;
+          display:flex;flex-direction:column;align-items:center;justify-content:center;text-align:center;
+          color:#1f3a8a;transform:rotate(-7deg);opacity:.85;padding:10px;margin:6px 0}
+        .seal .s-top{font-size:10px;font-weight:800;text-transform:uppercase;line-height:1.15}
+        .seal .s-div{width:60%;height:1.5px;background:#1f3a8a;margin:5px 0}
+        .seal .s-bot{font-size:7.5px;font-weight:700;text-transform:uppercase;letter-spacing:.5px}
+        .foot{text-align:center;font-size:11px;color:#555;padding:8px;border-top:1.5px solid #111}
+        @media print{ body{background:#fff;padding:0} .sheet{max-width:100%} }
       </style></head><body>
-      <div style="display:flex;justify-content:space-between;align-items:flex-start">
-        <div><h1>${company?.name ?? "Invoice"}</h1><div class="muted">Invoice</div></div>
-        <div style="text-align:right"><h1>${invNumber(inv.number)}</h1>
-          <div class="muted">${new Date(inv.issuedAt ?? inv.createdAt).toLocaleDateString()}</div>
-          <div class="muted">Status: ${inv.status}</div></div>
+      <div class="sheet">
+        <div class="top">
+          <div class="co">
+            <div class="co-name">${esc(company?.name ?? "Company")}</div>
+            ${company?.address ? `<div class="co-addr">${esc(company.address)}</div>` : ""}
+          </div>
+          <div class="bc">
+            <svg id="bc"></svg>
+            <div class="no">${ref}</div>
+          </div>
+        </div>
+
+        <div class="sdet">
+          <table class="kv">
+            ${company?.phone ? kv("Phone", company.phone) : ""}
+            ${company?.gstin ? kv("GSTIN", company.gstin) : ""}
+            ${company?.email ? kv("Email ID", company.email) : ""}
+            ${company?.pan ? kv("PAN No", company.pan) : ""}
+          </table>
+        </div>
+
+        <div class="band"><span class="star">*</span>Tax Invoice<span class="star">*</span></div>
+
+        <div class="cust">
+          <div class="col">
+            <table class="kv">
+              ${kv("Customer Name", inv.customerName)}
+              ${kv("Address", inv.customerAddress)}
+              ${kv("Phone", inv.customerPhone)}
+            </table>
+          </div>
+          <div class="col">
+            <table class="kv">
+              ${kv("GSTIN", inv.customerGstin)}
+              ${kv("Invoice No.", ref)}
+              ${kv("Invoice Date", issued.toLocaleDateString())}
+              ${kv("Location", inv.location.name)}
+              ${kv("Status", inv.status)}
+            </table>
+          </div>
+        </div>
+
+        <table class="items">
+          <thead><tr>
+            <th class="c" style="width:34px">Sr.</th><th>Item</th>
+            <th class="c" style="width:80px">HSN</th>
+            <th class="r" style="width:70px">Qty</th>
+            <th class="r" style="width:100px">Rate</th>
+            <th class="r" style="width:110px">Amount</th>
+          </tr></thead>
+          <tbody>${rows}</tbody>
+        </table>
+
+        <div class="split">
+          <div class="terms">
+            <h4>Terms &amp; Conditions</h4>
+            <ol>${terms}</ol>
+          </div>
+          <div class="sums">
+            <table class="sums">
+              ${tRow("Subtotal", formatMoney(bill.subtotal, cur))}
+              ${bill.discountAmt > 0 ? tRow("Discount", `-${formatMoney(bill.discountAmt, cur)}`) : ""}
+              ${bill.taxAmt > 0 ? tRow(`CGST @ ${halfRate}%`, formatMoney(halfTax, cur)) : ""}
+              ${bill.taxAmt > 0 ? tRow(`SGST @ ${halfRate}%`, formatMoney(halfTax, cur)) : ""}
+              ${Math.abs(roundOff) > 0.001 ? tRow("Round off", formatMoney(roundOff, cur)) : ""}
+              ${tRow("Invoice Total", formatMoney(roundedTotal, cur), { grand: true })}
+            </table>
+          </div>
+        </div>
+
+        <div class="words">
+          <b>${amountInWords(roundedTotal, cur)}</b>
+        </div>
+
+        <div class="sign">
+          <div class="s">
+            ${inv.notes ? `<div class="lbl">Remarks: ${esc(inv.notes)}</div>` : "<div></div>"}
+            <div class="lbl">Customer Signature</div>
+          </div>
+          <div class="s">
+            <div class="co2">${esc(company?.name ?? "")}</div>
+            <div class="seal">
+              <div class="s-top">${sealTop}</div>
+              <div class="s-div"></div>
+              <div class="s-bot">Authorised Signatory</div>
+            </div>
+            <div class="lbl">Authorised Signatory</div>
+          </div>
+        </div>
+
+        <div class="foot">Thank you for your business — issued by ${esc(inv.createdBy.name)}</div>
       </div>
-      <div style="margin-top:20px"><strong>Bill to:</strong><br>${inv.customerName}
-        ${inv.customerPhone ? `<br>${inv.customerPhone}` : ""}
-        ${inv.customerAddress ? `<br>${inv.customerAddress}` : ""}</div>
-      <table><thead><tr><th>Item</th><th style="text-align:right">Qty</th>
-        <th style="text-align:right">Price</th><th style="text-align:right">Amount</th></tr></thead>
-        <tbody>${rows}</tbody>
-        <tfoot>
-          <tr><td colspan="3" style="text-align:right;border-top:2px solid #111">Subtotal</td>
-            <td style="text-align:right;border-top:2px solid #111">${formatMoney(bill.subtotal, currency)}</td></tr>
-          ${
-            bill.discountAmt > 0
-              ? `<tr><td colspan="3" style="text-align:right;border:none">Discount</td><td style="text-align:right;border:none">-${formatMoney(bill.discountAmt, currency)}</td></tr>`
-              : ""
-          }
-          ${
-            bill.taxAmt > 0
-              ? `<tr><td colspan="3" style="text-align:right;border:none">Tax (${bill.taxRate}%)</td><td style="text-align:right;border:none">${formatMoney(bill.taxAmt, currency)}</td></tr>`
-              : ""
-          }
-          <tr><td colspan="3" style="text-align:right;font-weight:bold;border:none">TOTAL</td>
-            <td style="text-align:right;font-weight:bold;border:none">${formatMoney(bill.total, currency)}</td></tr>
-        </tfoot>
-      </table>
-      ${inv.notes ? `<p class="muted" style="margin-top:20px">${inv.notes}</p>` : ""}
+      <script src="https://cdn.jsdelivr.net/npm/jsbarcode@3.11.6/dist/JsBarcode.all.min.js"><\/script>
+      <script>window.onload=function(){
+        try{JsBarcode('#bc', ${JSON.stringify(ref)}, {format:'CODE128',height:40,fontSize:11,margin:0,displayValue:false});}catch(e){}
+        setTimeout(function(){window.print();},450);
+      };<\/script>
       </body></html>`;
-    const w = window.open("", "_blank", "width=800,height=900");
+
+    const w = window.open("", "_blank", "width=900,height=1040");
     if (!w) return;
     w.document.write(html);
     w.document.close();
     w.focus();
-    w.print();
   }
 
   if (loading)
@@ -378,6 +629,15 @@ export function InvoiceDetailPage() {
                   </option>
                 ))}
               </Select>
+            </Field>
+          </div>
+          <div className="grid gap-4 sm:grid-cols-2">
+            <Field label="Customer GSTIN" hint="optional — for B2B invoices">
+              <Input
+                value={customerGstin}
+                placeholder="22AAAAA0000A1Z5"
+                onChange={(e) => setCustomerGstin(e.target.value.toUpperCase())}
+              />
             </Field>
           </div>
 
