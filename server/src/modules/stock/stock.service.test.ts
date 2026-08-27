@@ -33,7 +33,7 @@ describe("stock service", () => {
       type: "PURCHASE",
       quantity: 100,
     });
-    expect(purchase.quantity).toBe(100);
+    expect(Number(purchase.quantity)).toBe(100);
 
     const sale = await stockService.createMovement(company.id, user.id, {
       productId: product.id,
@@ -41,12 +41,10 @@ describe("stock service", () => {
       type: "SALE",
       quantity: 3, // client sends POSITIVE...
     });
-    expect(sale.quantity).toBe(-3); // ...server stores NEGATIVE
+    expect(Number(sale.quantity)).toBe(-3); // ...server stores NEGATIVE
 
-    const level = await stockService.getStockLevel(
-      company.id,
-      product.id,
-      location.id
+    const level = Number(
+      await stockService.getStockLevel(company.id, product.id, location.id)
     );
     expect(level).toBe(97);
   });
@@ -77,10 +75,8 @@ describe("stock service", () => {
     });
     expect(count).toBe(1); // only the purchase
 
-    const level = await stockService.getStockLevel(
-      company.id,
-      product.id,
-      location.id
+    const level = Number(
+      await stockService.getStockLevel(company.id, product.id, location.id)
     );
     expect(level).toBe(5); // untouched
   });
@@ -100,7 +96,7 @@ describe("stock service", () => {
       type: "ADJUSTMENT",
       quantity: -2, // adjustments arrive already signed
     });
-    expect(adj.quantity).toBe(-2);
+    expect(Number(adj.quantity)).toBe(-2);
 
     await expectAppError(
       stockService.createMovement(company.id, user.id, {
@@ -133,20 +129,16 @@ describe("stock service", () => {
     });
 
     // the twins: −20 out, +20 in, stapled by the same transferId
-    expect(result.out.quantity).toBe(-20);
-    expect(result.in.quantity).toBe(20);
+    expect(Number(result.out.quantity)).toBe(-20);
+    expect(Number(result.in.quantity)).toBe(20);
     expect(result.out.transferId).toBe(result.in.transferId);
 
     // the books balance
-    const atMain = await stockService.getStockLevel(
-      company.id,
-      product.id,
-      location.id
+    const atMain = Number(
+      await stockService.getStockLevel(company.id, product.id, location.id)
     );
-    const atGodown = await stockService.getStockLevel(
-      company.id,
-      product.id,
-      godown.id
+    const atGodown = Number(
+      await stockService.getStockLevel(company.id, product.id, godown.id)
     );
     expect(atMain).toBe(30);
     expect(atGodown).toBe(20);

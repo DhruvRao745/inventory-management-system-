@@ -3,6 +3,7 @@
  * presentation rebuilt on the token system.
  */
 import { useEffect, useState, type FormEvent } from "react";
+import { qtyNum } from "../lib/format";
 import { Link } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import type { Product, StockLevel, Supplier } from "../lib/types";
@@ -158,7 +159,7 @@ export function ProductsPage() {
     const sums = new Map<string, number>();
     const low = new Set<string>();
     for (const l of levels) {
-      sums.set(l.product.id, (sums.get(l.product.id) ?? 0) + l.quantity);
+      sums.set(l.product.id, (sums.get(l.product.id) ?? 0) + qtyNum(l.quantity));
       if (l.lowStock) low.add(l.product.id);
     }
     setOnHand(sums);
@@ -739,7 +740,7 @@ export function ProductsPage() {
                 <Input
                   type="number"
                   min="0"
-                  step="1"
+                  step="any"
                   required
                   value={form.lowStockThreshold}
                   onChange={(e) =>

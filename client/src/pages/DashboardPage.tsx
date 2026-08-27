@@ -13,7 +13,7 @@ import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import type { StockLevel, StockMovement } from "../lib/types";
-import { formatMoney } from "../lib/format";
+import { formatMoney, qtyNum, formatQty } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { ErrorAlert, cardClass, SectionTitle } from "../components/ui";
 import { TYPE_COLORS, PALETTE, hashColor } from "../lib/colors";
@@ -144,7 +144,7 @@ export function DashboardPage() {
   if (error) return <ErrorAlert>{error}</ErrorAlert>;
 
   /* ---------- derived numbers ---------- */
-  const totalUnits = levels.reduce((s, l) => s + l.quantity, 0);
+  const totalUnits = levels.reduce((s, l) => s + qtyNum(l.quantity), 0);
   const lowStockRows = levels.filter((l) => l.lowStock);
 
   const soldOf = (rows: SummaryRow[]) =>
@@ -160,7 +160,7 @@ export function DashboardPage() {
   for (const l of levels)
     byLocation.set(
       l.location.name,
-      (byLocation.get(l.location.name) ?? 0) + l.quantity
+      (byLocation.get(l.location.name) ?? 0) + qtyNum(l.quantity)
     );
   const locEntries = [...byLocation.entries()].filter(([, v]) => v > 0);
   const locTotal = locEntries.reduce((s, [, v]) => s + v, 0);
@@ -544,12 +544,12 @@ export function DashboardPage() {
                   </div>
                   <span
                     className={`shrink-0 rounded-[4px] border-2 border-[var(--line)] px-2 py-0.5 text-sm font-black text-white ${
-                      m.quantity > 0 ? "bg-emerald-500" : "bg-red-500"
+                      qtyNum(m.quantity) > 0 ? "bg-emerald-500" : "bg-red-500"
                     }`}
                   >
-                    {m.quantity > 0
-                      ? `+${m.quantity.toLocaleString()}`
-                      : m.quantity.toLocaleString()}
+                    {qtyNum(m.quantity) > 0
+                      ? `+${formatQty(m.quantity)}`
+                      : formatQty(m.quantity)}
                   </span>
                 </div>
               ))}

@@ -19,7 +19,7 @@ services:
     restart: unless-stopped
     environment:
       POSTGRES_USER: inventory
-      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-inventory_dev_password}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}
       POSTGRES_DB: inventory
     volumes:
       - inventory_prod_pgdata:/var/lib/postgresql/data
@@ -39,9 +39,14 @@ services:
     environment:
       # "db" is the service name above — inside Docker's network,
       # containers reach each other by name, not localhost
-      DATABASE_URL: postgresql://inventory:${POSTGRES_PASSWORD:-inventory_dev_password}@db:5432/inventory
-      JWT_SECRET: ${JWT_SECRET:-local-test-only-secret}
-      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:-local-test-only-refresh}
+      # No `:-fallback` defaults on secrets, deliberately. A fallback means a
+      # forgotten variable starts the stack with a publicly-known secret
+      # instead of failing — which is exactly how the live deployment ended up
+      # signing tokens with "change-me-in-production".
+      # `${VAR:?message}` makes Compose refuse to start and say what's missing.
+      DATABASE_URL: postgresql://inventory:${POSTGRES_PASSWORD:?set POSTGRES_PASSWORD}@db:5432/inventory
+      JWT_SECRET: ${JWT_SECRET:?set JWT_SECRET — node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"}
+      JWT_REFRESH_SECRET: ${JWT_REFRESH_SECRET:?set JWT_REFRESH_SECRET — must differ from JWT_SECRET}
       NODE_ENV: production
     depends_on:
       db:

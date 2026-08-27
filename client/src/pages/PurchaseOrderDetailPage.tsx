@@ -15,7 +15,7 @@ import type {
   Location,
 } from "../lib/types";
 import { poNumber } from "../lib/types";
-import { formatMoney } from "../lib/format";
+import { formatMoney, qtyNum, formatQty } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Modal } from "../components/Modal";
@@ -111,7 +111,7 @@ export function PurchaseOrderDetailPage() {
   const total = useMemo(() => {
     if (!editable && po) {
       return po.lines.reduce(
-        (s, l) => s + Number(l.unitCost) * l.quantity,
+        (s, l) => s + Number(l.unitCost) * qtyNum(l.quantity),
         0
       );
     }
@@ -195,7 +195,9 @@ export function PurchaseOrderDetailPage() {
     // Pre-fill each line's "receive now" with whatever's still outstanding.
     const seed: Record<string, string> = {};
     po?.lines.forEach((l) => {
-      seed[l.id] = String(Math.max(0, l.quantity - l.receivedQty));
+      seed[l.id] = String(
+        Math.max(0, qtyNum(l.quantity) - qtyNum(l.receivedQty))
+      );
     });
     setReceiveQtys(seed);
     setReceiveError(null);
@@ -334,7 +336,7 @@ export function PurchaseOrderDetailPage() {
                   <Input
                     type="number"
                     min="1"
-                    step="1"
+                    step="any"
                     placeholder="Qty"
                     value={l.quantity}
                     onChange={(e) => setLine(i, { quantity: e.target.value })}
@@ -460,20 +462,20 @@ export function PurchaseOrderDetailPage() {
                     </td>
                     <td
                       className={`px-4 py-3 text-right text-sm font-black ${
-                        l.receivedQty >= l.quantity
+                        qtyNum(l.receivedQty) >= qtyNum(l.quantity)
                           ? "text-emerald-500"
-                          : l.receivedQty > 0
+                          : qtyNum(l.receivedQty) > 0
                             ? "text-amber-500"
                             : "text-[var(--muted)]"
                       }`}
                     >
-                      {l.receivedQty.toLocaleString()} / {l.quantity.toLocaleString()}
+                      {formatQty(l.receivedQty)} / {formatQty(l.quantity)}
                     </td>
                     <td className="px-4 py-3 text-right text-sm font-semibold text-[var(--muted)]">
                       {formatMoney(Number(l.unitCost), currency)}
                     </td>
                     <td className="px-4 py-3 text-right text-sm font-black text-[var(--text)]">
-                      {formatMoney(Number(l.unitCost) * l.quantity, currency)}
+                      {formatMoney(Number(l.unitCost) * qtyNum(l.quantity), currency)}
                     </td>
                   </tr>
                 ))}
@@ -534,7 +536,10 @@ export function PurchaseOrderDetailPage() {
                 <span className="text-right">Receive now</span>
               </div>
               {po.lines.map((l) => {
-                const remaining = Math.max(0, l.quantity - l.receivedQty);
+                const remaining = Math.max(
+                  0,
+                  qtyNum(l.quantity) - qtyNum(l.receivedQty)
+                );
                 return (
                   <div
                     key={l.id}
@@ -550,7 +555,7 @@ export function PurchaseOrderDetailPage() {
                       <Input
                         type="number"
                         min="0"
-                        step="1"
+                        step="any"
                         max={remaining}
                         disabled={remaining === 0}
                         value={receiveQtys[l.id] ?? ""}

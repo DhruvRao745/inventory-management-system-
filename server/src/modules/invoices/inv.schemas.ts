@@ -7,7 +7,10 @@ import { z } from "zod";
 
 const lineSchema = z.object({
   productId: z.string().min(1),
-  quantity: z.number().int().positive("Quantity must be at least 1"),
+  // Decimal-capable since P1-2 (2.5 kg is a valid line). Whether THIS
+  // product may carry decimals is checked server-side against
+  // Product.precision — Zod doesn't know which product this line is for.
+  quantity: z.union([z.number().positive(), z.string().trim().min(1)]),
   unitPrice: z.number().nonnegative("Price can't be negative"),
 });
 

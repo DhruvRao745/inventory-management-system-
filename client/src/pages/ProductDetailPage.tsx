@@ -5,7 +5,7 @@ import { useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import type { Product, StockLevel, StockMovement } from "../lib/types";
-import { formatMoney } from "../lib/format";
+import { formatMoney, qtyNum, formatQty } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { ErrorAlert, cardClass, SectionTitle } from "../components/ui";
 import { PoRefLink } from "../components/PoRefLink";
@@ -64,7 +64,7 @@ export function ProductDetailPage() {
       </div>
     );
 
-  const totalUnits = levels.reduce((sum, l) => sum + l.quantity, 0);
+  const totalUnits = levels.reduce((sum, l) => sum + qtyNum(l.quantity), 0);
 
   // Gross margin: profit per unit, and that profit as a % of the selling
   // price. Guard against a zero selling price (no meaningful %).
@@ -300,12 +300,14 @@ export function ProductDetailPage() {
                     <td className={`${td} text-right`}>
                       <span
                         className={`rounded-[4px] border-2 border-[var(--line)] px-2 py-0.5 text-xs font-black text-white ${
-                          m.quantity > 0 ? "bg-emerald-500" : "bg-red-500"
+                          qtyNum(m.quantity) > 0
+                            ? "bg-emerald-500"
+                            : "bg-red-500"
                         }`}
                       >
-                        {m.quantity > 0
-                          ? `+${m.quantity.toLocaleString()}`
-                          : m.quantity.toLocaleString()}
+                        {qtyNum(m.quantity) > 0
+                          ? `+${formatQty(m.quantity)}`
+                          : formatQty(m.quantity)}
                       </span>
                     </td>
                     <td className={`${td} font-semibold text-[var(--muted)]`}>

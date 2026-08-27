@@ -11,10 +11,13 @@
  */
 import { Router } from "express";
 import { z } from "zod";
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 import { asyncHandler, AppError } from "../../middleware/error.js";
 import { requireAuth, type AuthRequest } from "../../middleware/auth.js";
 import { grandTotal } from "../invoices/inv.service.js";
+import { grossProfit } from "../../lib/costing.js";
+import { reorderReport } from "../reorder/reorder.service.js";
 
 // The client sends exact universal instants (ISO format, e.g.
 // "2026-07-08T18:30:00.000Z") — IT knows the user's timezone; we don't.
@@ -47,6 +50,7 @@ reportsRouter.get(
         unit: true,
         costPrice: true,
         sellingPrice: true,
+        avgCost: true,
         isActive: true,
       },
     });
@@ -56,20 +60,22 @@ reportsRouter.get(
       .map((g) => {
         const p = productById.get(g.productId);
         if (!p) return null;
-        const quantity = g._sum.quantity ?? 0;
-        // Decimal comes out of Prisma as an object — Number() for math.
-        // Fine for a report; we round at the end.
-        const cost = Number(p.costPrice);
-        const retail = Number(p.sellingPrice);
+        // Quantity is Decimal since P1-2, and so are the prices. Multiply
+        // as Decimals and convert ONCE at the end — a valuation report that
+        // drifts by a paisa per row is a valuation report nobody trusts.
+        const quantity = g._sum.quantity ?? new Prisma.Decimal(0);
         return {
           productId: p.id,
           sku: p.sku,
           name: p.name,
           unit: p.unit,
           isActive: p.isActive,
-          quantity,
-          costValue: Math.round(quantity * cost * 100) / 100,
-          retailValue: Math.round(quantity * retail * 100) / 100,
+          quantity: Number(quantity),
+          // avgCost, NOT costPrice (P1-3). costPrice is whatever someone last
+          // typed; avgCost is what the stock on this shelf actually cost us.
+          avgCost: Number(p.avgCost),
+          costValue: Number(quantity.times(p.avgCost).toDecimalPlaces(2)),
+          retailValue: Number(quantity.times(p.sellingPrice).toDecimalPlaces(2)),
         };
       })
       .filter((r) => r !== null)
@@ -128,7 +134,8 @@ reportsRouter.get(
             name: p.name,
             sku: p.sku,
             unit: p.unit,
-            unitsSold: Math.abs(g._sum.quantity ?? 0),
+            // Sales are stored negative; report them positive.
+            unitsSold: Number((g._sum.quantity ?? new Prisma.Decimal(0)).abs()),
           };
         })
         .filter((r) => r !== null)
@@ -157,7 +164,7 @@ reportsRouter.get(
       grouped.map((g) => ({
         type: g.type,
         movements: g._count._all,
-        netQuantity: g._sum.quantity ?? 0,
+        netQuantity: Number(g._sum.quantity ?? new Prisma.Decimal(0)),
       }))
     );
   })
@@ -210,7 +217,7 @@ reportsRouter.get(
     const byDay = new Map<string, number>();
     for (const s of sales) {
       const key = localDayKey(s.createdAt, tzOffset);
-      byDay.set(key, (byDay.get(key) ?? 0) + Math.abs(s.quantity));
+      byDay.set(key, (byDay.get(key) ?? 0) + Number(s.quantity.abs()));
     }
 
     // Fill EVERY day in the range (even zero-sale days) so the chart has an
@@ -265,13 +272,18 @@ reportsRouter.get(
     for (const po of pos) {
       byStatus[po.status] = (byStatus[po.status] ?? 0) + 1;
 
-      const ordered = po.lines.reduce(
-        (s, l) => s + Number(l.unitCost) * l.quantity,
-        0
+      // Decimal per line, one Number() at the end — see P1-2.
+      const ordered = Number(
+        po.lines.reduce(
+          (s, l) => s.plus(l.unitCost.times(l.quantity)),
+          new Prisma.Decimal(0)
+        )
       );
-      const received = po.lines.reduce(
-        (s, l) => s + Number(l.unitCost) * l.receivedQty,
-        0
+      const received = Number(
+        po.lines.reduce(
+          (s, l) => s.plus(l.unitCost.times(l.receivedQty)),
+          new Prisma.Decimal(0)
+        )
       );
       receivedValue += received;
       const counts = po.status !== "CANCELLED";
@@ -389,9 +401,11 @@ reportsRouter.get(
     let totalRevenue = 0;
 
     for (const inv of invoices) {
-      const subtotal = inv.lines.reduce(
-        (s, l) => s + Number(l.unitPrice) * l.quantity,
-        0
+      const subtotal = Number(
+        inv.lines.reduce(
+          (s, l) => s.plus(l.unitPrice.times(l.quantity)),
+          new Prisma.Decimal(0)
+        )
       );
       // The ACTUAL money for this invoice — after discount, plus tax — same
       // as the invoice total the customer sees.
@@ -408,7 +422,7 @@ reportsRouter.get(
       byCustomer.set(inv.customerName, c);
 
       for (const l of inv.lines) {
-        const lineSub = Number(l.unitPrice) * l.quantity;
+        const lineSub = Number(l.unitPrice.times(l.quantity));
         // Spread the invoice's discount/tax across lines by their share of
         // the subtotal, so per-product revenue sums back to the invoice total.
         const rev = subtotal > 0 ? invTotal * (lineSub / subtotal) : 0;
@@ -419,7 +433,7 @@ reportsRouter.get(
           units: 0,
           revenue: 0,
         };
-        p.units += l.quantity;
+        p.units += Number(l.quantity);
         p.revenue += rev;
         byProduct.set(l.productId, p);
       }
@@ -446,43 +460,127 @@ reportsRouter.get(
 reportsRouter.get(
   "/reorder",
   asyncHandler(async (req: AuthRequest, res) => {
+    // Delegates to the P1-8 location-aware service. This endpoint used to sum
+    // stock across every location before comparing against one company-wide
+    // threshold, which meant a nearly-empty warehouse raised no warning as
+    // long as some OTHER warehouse was full (PRD §11). Kept as an alias so
+    // existing callers don't break; /api/reorder is the canonical path.
+    const locationId =
+      typeof req.query.locationId === "string" ? req.query.locationId : undefined;
+    res.json(await reorderReport(req.user!.companyId, { locationId }));
+  })
+);
+
+/**
+ * GET /api/reports/profitability?from&to
+ *
+ * Revenue, COGS, gross profit and margin — the three figures the PRD insists
+ * on keeping distinct (§7), plus a per-product breakdown.
+ *
+ * This is NOT `sellingPrice − costPrice`. Every SALE movement carries the
+ * weighted-average cost that applied at the moment it happened, so these
+ * numbers are a sum over recorded facts and cannot drift when today's prices
+ * change. That is the difference between a profit report and a guess.
+ */
+reportsRouter.get(
+  "/profitability",
+  asyncHandler(async (req: AuthRequest, res) => {
     const companyId = req.user!.companyId;
+    const { from, to } = dateRangeSchema.parse(req.query);
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
 
-    const products = await prisma.product.findMany({
-      where: { companyId, isActive: true, lowStockThreshold: { gt: 0 } },
-      include: { preferredSupplier: { select: { id: true, name: true } } },
+    // Revenue comes from ISSUED/PAID invoices in the window — what we billed.
+    const invoices = await prisma.invoice.findMany({
+      where: {
+        companyId,
+        status: { in: ["ISSUED", "PAID"] },
+        issuedAt: { gte: fromDate, lte: toDate },
+      },
+      include: { lines: { include: { product: { select: { id: true, sku: true, name: true } } } } },
     });
 
-    // On-hand per product = sum of all its movements (across locations).
-    const grouped = await prisma.stockMovement.groupBy({
-      by: ["productId"],
-      where: { companyId },
-      _sum: { quantity: true },
+    // COGS comes from the LEDGER, not the invoices — every SALE movement
+    // already knows what it cost.
+    const sales = await prisma.stockMovement.findMany({
+      where: {
+        companyId,
+        type: "SALE",
+        createdAt: { gte: fromDate, lte: toDate },
+      },
+      select: { productId: true, quantity: true, costAtTime: true },
     });
-    const onHandById = new Map(
-      grouped.map((g) => [g.productId, g._sum.quantity ?? 0])
-    );
 
-    const rows = products
-      .map((p) => {
-        const onHand = onHandById.get(p.id) ?? 0;
-        return { p, onHand };
+    type Row = {
+      productId: string;
+      sku: string;
+      name: string;
+      revenue: Prisma.Decimal;
+      cogs: Prisma.Decimal;
+      unitsSold: Prisma.Decimal;
+    };
+    const byProduct = new Map<string, Row>();
+    const zero = () => new Prisma.Decimal(0);
+
+    for (const inv of invoices) {
+      for (const l of inv.lines) {
+        const row =
+          byProduct.get(l.productId) ??
+          {
+            productId: l.productId,
+            sku: l.product.sku,
+            name: l.product.name,
+            revenue: zero(),
+            cogs: zero(),
+            unitsSold: zero(),
+          };
+        row.revenue = row.revenue.plus(l.unitPrice.times(l.quantity));
+        byProduct.set(l.productId, row);
+      }
+    }
+
+    for (const m of sales) {
+      const row = byProduct.get(m.productId);
+      if (!row) continue; // sold without an invoice (direct movement)
+      const qty = m.quantity.abs();
+      row.unitsSold = row.unitsSold.plus(qty);
+      if (m.costAtTime) row.cogs = row.cogs.plus(qty.times(m.costAtTime));
+    }
+
+    const rows = [...byProduct.values()]
+      .map((r) => {
+        const { profit, margin } = grossProfit(r.revenue, r.cogs);
+        return {
+          productId: r.productId,
+          sku: r.sku,
+          name: r.name,
+          unitsSold: Number(r.unitsSold),
+          revenue: Number(r.revenue.toDecimalPlaces(2)),
+          cogs: Number(r.cogs.toDecimalPlaces(2)),
+          grossProfit: Number(profit),
+          margin: Number(margin),
+        };
       })
-      .filter(({ p, onHand }) => onHand <= p.lowStockThreshold)
-      .map(({ p, onHand }) => ({
-        productId: p.id,
-        name: p.name,
-        sku: p.sku,
-        unit: p.unit,
-        onHand,
-        threshold: p.lowStockThreshold,
-        // Top back up to ~2× the threshold (at least 1).
-        suggestedQty: Math.max(1, p.lowStockThreshold * 2 - onHand),
-        costPrice: p.costPrice,
-        preferredSupplier: p.preferredSupplier,
-      }))
-      .sort((a, b) => a.onHand - b.onHand);
+      .sort((a, b) => b.grossProfit - a.grossProfit);
 
-    res.json(rows);
+    const totalRevenue = [...byProduct.values()].reduce(
+      (s, r) => s.plus(r.revenue),
+      new Prisma.Decimal(0)
+    );
+    const totalCogs = [...byProduct.values()].reduce(
+      (s, r) => s.plus(r.cogs),
+      new Prisma.Decimal(0)
+    );
+    const totals = grossProfit(totalRevenue, totalCogs);
+
+    res.json({
+      rows,
+      totals: {
+        revenue: Number(totalRevenue.toDecimalPlaces(2)),
+        cogs: Number(totalCogs.toDecimalPlaces(2)),
+        grossProfit: Number(totals.profit),
+        margin: Number(totals.margin),
+      },
+    });
   })
 );

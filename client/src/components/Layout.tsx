@@ -98,6 +98,18 @@ const icons = {
       <path d="M9 8h6M9 12h4" />
     </IconBase>
   ),
+  returns: (
+    <IconBase>
+      <path d="M9 14 4 9l5-5" />
+      <path d="M4 9h10a6 6 0 0 1 0 12h-3" />
+    </IconBase>
+  ),
+  batches: (
+    <IconBase>
+      <path d="M3 7l9-4 9 4-9 4-9-4z" />
+      <path d="M3 12l9 4 9-4M3 17l9 4 9-4" />
+    </IconBase>
+  ),
   scan: (
     <IconBase>
       <path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2" />
@@ -135,10 +147,12 @@ const navItems = [
   { to: "/", label: "Dashboard", icon: icons.dashboard, color: "#3b82f6", end: true },
   { to: "/products", label: "Products", icon: icons.products, color: "#a855f7" },
   { to: "/stock", label: "Stock", icon: icons.stock, color: "#f59e0b" },
+  { to: "/batches", label: "Batches", icon: icons.batches, color: "#8b5cf6" },
   { to: "/scan", label: "Scan", icon: icons.scan, color: "#06b6d4" },
   { to: "/suppliers", label: "Suppliers", icon: icons.suppliers, color: "#14b8a6" },
   { to: "/purchase-orders", label: "Purchases", icon: icons.purchases, color: "#6366f1" },
   { to: "/invoices", label: "Invoices", icon: icons.invoices, color: "#eab308" },
+  { to: "/returns", label: "Returns", icon: icons.returns, color: "#fb7185" },
   { to: "/customers", label: "Customers", icon: icons.customers, color: "#f43f5e" },
   { to: "/reports", label: "Reports", icon: icons.reports, color: "#10b981" },
   { to: "/audit", label: "Activity", icon: icons.activity, color: "#64748b" },

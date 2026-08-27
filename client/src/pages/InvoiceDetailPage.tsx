@@ -6,9 +6,17 @@
 import { useEffect, useMemo, useState, type FormEvent } from "react";
 import { Link, useNavigate, useParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import type { Invoice, Product, Location, Customer } from "../lib/types";
+import type {
+  Invoice,
+  Product,
+  Location,
+  Customer,
+  Payment,
+  PaymentMethod,
+} from "../lib/types";
+import { PAYMENT_METHOD_LABELS } from "../lib/types";
 import { invNumber } from "../lib/types";
-import { formatMoney } from "../lib/format";
+import { formatMoney, qtyNum, formatQty } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { ProductPicker } from "../components/ProductPicker";
@@ -84,6 +92,11 @@ function amountInWords(amount: number, currency = "INR"): string {
   return `${main}${paise} Only`;
 }
 
+// Table cell styles, matching the inline classes used elsewhere in this file.
+const th =
+  "px-4 py-3 text-left text-xs font-black uppercase tracking-wide text-[var(--muted)]";
+const td = "px-4 py-3 text-sm";
+
 export function InvoiceDetailPage() {
   const { id } = useParams<{ id: string }>();
   const isNew = !id;
@@ -110,6 +123,14 @@ export function InvoiceDetailPage() {
   const [locationId, setLocationId] = useState("");
   const [lines, setLines] = useState<LineDraft[]>([{ ...emptyLine }]);
   const [formError, setFormError] = useState<string | null>(null);
+
+  // --- Payments (P1-5) ---
+  const [payAmount, setPayAmount] = useState("");
+  const [payMethod, setPayMethod] = useState<PaymentMethod>("CASH");
+  const [payReference, setPayReference] = useState("");
+  const [payError, setPayError] = useState<string | null>(null);
+  const [payBusy, setPayBusy] = useState(false);
+  const [deletingPaymentId, setDeletingPaymentId] = useState<string | null>(null);
   const [saving, setSaving] = useState(false);
   const [confirmCancel, setConfirmCancel] = useState(false);
 
@@ -163,7 +184,10 @@ export function InvoiceDetailPage() {
   const bill = useMemo(() => {
     const subtotal =
       !editable && inv
-        ? inv.lines.reduce((s, l) => s + Number(l.unitPrice) * l.quantity, 0)
+        ? inv.lines.reduce(
+            (s, l) => s + Number(l.unitPrice) * qtyNum(l.quantity),
+            0
+          )
         : lines.reduce(
             (s, l) =>
               s + (Number(l.unitPrice) || 0) * (Number(l.quantity) || 0),
@@ -249,6 +273,52 @@ export function InvoiceDetailPage() {
     }
   }
 
+  /** Reload the invoice so the derived balance/status come from the server. */
+  async function reloadInvoice() {
+    setInv(await api<Invoice>(`/invoices/${id}`));
+  }
+
+  async function recordPayment(e: FormEvent) {
+    e.preventDefault();
+    setPayError(null);
+    setPayBusy(true);
+    try {
+      await api("/payments", {
+        method: "POST",
+        body: JSON.stringify({
+          invoiceId: id,
+          amount: Number(payAmount),
+          method: payMethod,
+          reference: payReference.trim() || undefined,
+        }),
+      });
+      setPayAmount("");
+      setPayReference("");
+      await reloadInvoice();
+    } catch (err) {
+      setPayError(
+        err instanceof ApiError ? err.message : "Could not record payment"
+      );
+    } finally {
+      setPayBusy(false);
+    }
+  }
+
+  async function removePayment(paymentId: string) {
+    setPayError(null);
+    setDeletingPaymentId(paymentId);
+    try {
+      await api(`/payments/${paymentId}`, { method: "DELETE" });
+      await reloadInvoice();
+    } catch (err) {
+      setPayError(
+        err instanceof ApiError ? err.message : "Could not remove payment"
+      );
+    } finally {
+      setDeletingPaymentId(null);
+    }
+  }
+
   function printInvoice() {
     if (!inv) return;
 
@@ -288,9 +358,9 @@ export function InvoiceDetailPage() {
           <td><span class="pname">${esc(l.product.name)}</span>
             <span class="psku">${esc(l.product.sku)}</span></td>
           <td class="c">${l.product.hsnCode ? esc(l.product.hsnCode) : "—"}</td>
-          <td class="r">${l.quantity} ${esc(l.product.unit)}</td>
+          <td class="r">${formatQty(l.quantity)} ${esc(l.product.unit)}</td>
           <td class="r">${formatMoney(Number(l.unitPrice), cur)}</td>
-          <td class="r b">${formatMoney(Number(l.unitPrice) * l.quantity, cur)}</td>
+          <td class="r b">${formatMoney(Number(l.unitPrice) * qtyNum(l.quantity), cur)}</td>
         </tr>`,
       )
       .join("");
@@ -672,7 +742,7 @@ export function InvoiceDetailPage() {
                   <Input
                     type="number"
                     min="1"
-                    step="1"
+                    step="any"
                     placeholder="Qty"
                     value={l.quantity}
                     onChange={(e) => setLine(i, { quantity: e.target.value })}
@@ -845,7 +915,7 @@ export function InvoiceDetailPage() {
                       {formatMoney(Number(l.unitPrice), currency)}
                     </td>
                     <td className="px-4 py-3 text-right text-sm font-black text-[var(--text)]">
-                      {formatMoney(Number(l.unitPrice) * l.quantity, currency)}
+                      {formatMoney(Number(l.unitPrice) * qtyNum(l.quantity), currency)}
                     </td>
                   </tr>
                 ))}
@@ -893,6 +963,175 @@ export function InvoiceDetailPage() {
           </div>
         </>
       )}
+
+
+          {/* ---------- Payments (P1-5) ---------- */}
+          {inv && inv.status !== "DRAFT" && inv.status !== "CANCELLED" && (
+            <div className={`${cardClass} space-y-4 p-5`}>
+              <div className="flex flex-wrap items-baseline justify-between gap-2">
+                <SectionTitle>Payments</SectionTitle>
+                {inv.paymentStatus && (
+                  <span
+                    className={`rounded-[5px] border-2 border-[var(--line)] px-3 py-1 text-xs font-black uppercase tracking-wide ${
+                      inv.paymentStatus === "PAID"
+                        ? "bg-emerald-500 text-white"
+                        : inv.paymentStatus === "PARTIAL"
+                          ? "bg-amber-500 text-white"
+                          : inv.paymentStatus === "OVERPAID"
+                            ? "bg-red-500 text-white"
+                            : "bg-[var(--panel)] text-[var(--muted)]"
+                    }`}
+                  >
+                    {inv.paymentStatus}
+                  </span>
+                )}
+              </div>
+
+              {/* The three figures, straight from the server's derivation. */}
+              <div className="grid grid-cols-3 gap-3">
+                <div className="rounded-[5px] border-2 border-[var(--line)] bg-[var(--panel)] p-3">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">
+                    Invoice total
+                  </div>
+                  <div className="mt-1 text-lg font-black text-[var(--text)]">
+                    {formatMoney(Number(inv.totalAmount ?? 0), currency)}
+                  </div>
+                </div>
+                <div className="rounded-[5px] border-2 border-[var(--line)] bg-[var(--panel)] p-3">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">
+                    Paid
+                  </div>
+                  <div className="mt-1 text-lg font-black text-emerald-500">
+                    {formatMoney(Number(inv.paidAmount ?? 0), currency)}
+                  </div>
+                </div>
+                <div className="rounded-[5px] border-2 border-[var(--line)] bg-[var(--panel)] p-3">
+                  <div className="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">
+                    Balance
+                  </div>
+                  <div
+                    className={`mt-1 text-lg font-black ${
+                      Number(inv.balanceAmount ?? 0) > 0
+                        ? "text-[var(--accent)]"
+                        : "text-[var(--muted)]"
+                    }`}
+                  >
+                    {formatMoney(Number(inv.balanceAmount ?? 0), currency)}
+                  </div>
+                </div>
+              </div>
+
+              {payError && <ErrorAlert>{payError}</ErrorAlert>}
+
+              {/* Only offer the form while something is actually outstanding —
+                  the server refuses overpayment, but a form that always
+                  appears invites an error instead of preventing one. */}
+              {canEdit && Number(inv.balanceAmount ?? 0) > 0 && (
+                <form
+                  onSubmit={recordPayment}
+                  className="grid gap-3 sm:grid-cols-[1fr_1fr_1fr_auto]"
+                >
+                  <Field label="Amount">
+                    <Input
+                      type="number"
+                      min="0.01"
+                      step="0.01"
+                      required
+                      placeholder={String(inv.balanceAmount ?? "")}
+                      value={payAmount}
+                      onChange={(e) => setPayAmount(e.target.value)}
+                    />
+                  </Field>
+                  <Field label="Method">
+                    <Select
+                      value={payMethod}
+                      onChange={(e) =>
+                        setPayMethod(e.target.value as PaymentMethod)
+                      }
+                    >
+                      {(
+                        Object.keys(PAYMENT_METHOD_LABELS) as PaymentMethod[]
+                      ).map((m) => (
+                        <option key={m} value={m}>
+                          {PAYMENT_METHOD_LABELS[m]}
+                        </option>
+                      ))}
+                    </Select>
+                  </Field>
+                  <Field label="Reference" hint="optional">
+                    <Input
+                      value={payReference}
+                      onChange={(e) => setPayReference(e.target.value)}
+                      placeholder="UPI ref, cheque no."
+                    />
+                  </Field>
+                  <div className="flex items-end">
+                    <Button type="submit" disabled={payBusy}>
+                      {payBusy ? "Recording…" : "Record payment"}
+                    </Button>
+                  </div>
+                </form>
+              )}
+
+              {inv.payments && inv.payments.length > 0 ? (
+                <div className="overflow-x-auto rounded-[5px] border-2 border-[var(--line)]">
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b-2 border-[var(--line)] bg-[var(--panel)]">
+                        <th className={th}>Date</th>
+                        <th className={th}>Method</th>
+                        <th className={th}>Reference</th>
+                        <th className={th}>Recorded by</th>
+                        <th className={`${th} text-right`}>Amount</th>
+                        {canEdit && <th className={`${th} text-right`} />}
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {inv.payments.map((p: Payment) => (
+                        <tr
+                          key={p.id}
+                          className="border-b border-[var(--line)] last:border-0"
+                        >
+                          <td className={`${td} font-semibold text-[var(--text)]`}>
+                            {new Date(p.paymentDate).toLocaleDateString()}
+                          </td>
+                          <td className={`${td} font-semibold text-[var(--muted)]`}>
+                            {PAYMENT_METHOD_LABELS[p.method]}
+                          </td>
+                          <td className={`${td} font-semibold text-[var(--muted)]`}>
+                            {p.reference || "—"}
+                          </td>
+                          <td className={`${td} font-semibold text-[var(--muted)]`}>
+                            {p.createdBy.name}
+                          </td>
+                          <td className={`${td} text-right font-black text-[var(--text)]`}>
+                            {formatMoney(Number(p.amount), currency)}
+                          </td>
+                          {canEdit && (
+                            <td className={`${td} text-right`}>
+                              <button
+                                type="button"
+                                onClick={() => removePayment(p.id)}
+                                disabled={deletingPaymentId === p.id}
+                                title="Remove this payment (for a mistyped entry)"
+                                className="rounded-[4px] border-2 border-[var(--line)] bg-[var(--card)] px-2 py-1 text-xs font-bold text-[var(--text)] hover:bg-[var(--hover)] disabled:opacity-40"
+                              >
+                                {deletingPaymentId === p.id ? "…" : "Remove"}
+                              </button>
+                            </td>
+                          )}
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              ) : (
+                <p className="text-sm font-bold text-[var(--muted)]">
+                  Nothing received yet.
+                </p>
+              )}
+            </div>
+          )}
 
       {confirmCancel && (
         <ConfirmModal

@@ -14,8 +14,10 @@ import {
   transferSchema,
   listMovementsQuerySchema,
   levelsQuerySchema,
+  batchQuerySchema,
 } from "./stock.schemas.js";
 import * as stockService from "./stock.service.js";
+import * as batchService from "./batch.service.js";
 import { asyncHandler } from "../../middleware/error.js";
 import { requireAuth, type AuthRequest } from "../../middleware/auth.js";
 
@@ -66,5 +68,25 @@ stockRouter.get(
     const query = levelsQuerySchema.parse(req.query);
     const result = await stockService.stockLevels(req.user!.companyId, query);
     res.json(result);
+  })
+);
+
+// GET /api/stock/batches — live lots, nearest expiry first (P1-1).
+//   ?expiringInDays=30  → the "what's about to go off" view
+//   ?includeEmpty=true  → include fully-consumed lots (history)
+stockRouter.get(
+  "/batches",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const q = batchQuerySchema.parse(req.query);
+    const batches = await batchService.listBatches(req.user!.companyId, {
+      productId: q.productId,
+      locationId: q.locationId,
+      includeEmpty: q.includeEmpty,
+      expiringBefore:
+        q.expiringInDays === undefined
+          ? undefined
+          : new Date(Date.now() + q.expiringInDays * 24 * 60 * 60 * 1000),
+    });
+    res.json({ items: batches, total: batches.length });
   })
 );

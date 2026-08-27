@@ -14,7 +14,13 @@ export const createMovementSchema = z
     type: z.enum(["PURCHASE", "SALE", "RETURN_IN", "RETURN_OUT", "ADJUSTMENT"]),
     // Always positive — "sold 3", never "-3". The SERVER decides the sign.
     // Exception: ADJUSTMENT may be negative ("found 2 broken" = -2).
-    quantity: z.number().int("Whole numbers only"),
+    //
+    // No .int() since P1-2: 2.5 kg is a legitimate quantity. Whether THIS
+    // product may have decimals is decided by Product.precision, checked
+    // server-side in lib/quantity.ts — Zod can't know which product this is.
+    // Accepts a string too, so a client can send "2.5" without a float
+    // round-trip mangling it.
+    quantity: z.union([z.number(), z.string().trim().min(1)]),
     unitCost: z.number().nonnegative().optional(),
     reference: z.string().trim().optional(), // invoice / PO number
     note: z.string().trim().optional(),
@@ -23,14 +29,25 @@ export const createMovementSchema = z
     expiryDate: z.string().datetime().optional(),
   })
   .superRefine((data, ctx) => {
-    if (data.quantity === 0) {
+    // Shape-level checks only. Value-level rules that need the PRODUCT
+    // (precision, zero, sign) live in lib/quantity.ts — see parseQuantity.
+    const n = Number(data.quantity);
+    if (!Number.isFinite(n)) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["quantity"],
+        message: "Quantity must be a number",
+      });
+      return;
+    }
+    if (n === 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["quantity"],
         message: "Quantity can't be zero",
       });
     }
-    if (data.type !== "ADJUSTMENT" && data.quantity < 0) {
+    if (data.type !== "ADJUSTMENT" && n < 0) {
       ctx.addIssue({
         code: z.ZodIssueCode.custom,
         path: ["quantity"],
@@ -44,7 +61,8 @@ export const transferSchema = z
     productId: z.string().min(1),
     fromLocationId: z.string().min(1),
     toLocationId: z.string().min(1),
-    quantity: z.number().int().positive("Quantity must be positive"),
+    // Decimal-capable since P1-2; per-product precision checked server-side.
+    quantity: z.union([z.number().positive(), z.string().trim().min(1)]),
     note: z.string().trim().optional(),
   })
   .refine((d) => d.fromLocationId !== d.toLocationId, {
@@ -80,7 +98,22 @@ export const levelsQuerySchema = z.object({
   productId: z.string().optional(),
 });
 
+/**
+ * Batch listing (P1-1).
+ *
+ * `expiringInDays` is the practical question a shop actually asks — "what
+ * goes off this month?" — so we take a day count and turn it into a date
+ * here rather than making every caller compute one.
+ */
+export const batchQuerySchema = z.object({
+  productId: z.string().optional(),
+  locationId: z.string().optional(),
+  includeEmpty: z.coerce.boolean().optional(),
+  expiringInDays: z.coerce.number().int().min(0).max(3650).optional(),
+});
+
 export type CreateMovementInput = z.infer<typeof createMovementSchema>;
 export type TransferInput = z.infer<typeof transferSchema>;
 export type ListMovementsQuery = z.infer<typeof listMovementsQuerySchema>;
 export type LevelsQuery = z.infer<typeof levelsQuerySchema>;
+export type BatchQuery = z.infer<typeof batchQuerySchema>;

@@ -84,7 +84,13 @@ invoicesRouter.post(
   "/:id/pay",
   requireRole("ADMIN", "MANAGER"),
   asyncHandler(async (req: AuthRequest, res) => {
-    res.json(await invService.payInvoice(req.user!.companyId, req.params.id));
+    res.json(
+      await invService.payInvoice(
+        req.user!.companyId,
+        req.user!.userId,
+        req.params.id
+      )
+    );
   })
 );
 

@@ -98,7 +98,7 @@ auditRouter.get(
         actor: m.createdBy.name,
         kind: "movement",
         action: m.type,
-        detail: `${m.quantity > 0 ? "+" : ""}${m.quantity} ${m.product.name} @ ${
+        detail: `${m.quantity.greaterThan(0) ? "+" : ""}${m.quantity.toString()} ${m.product.name} @ ${
           m.location.name
         }${m.reference ? ` (${m.reference})` : ""}`,
         link: `/products/${m.product.id}`,

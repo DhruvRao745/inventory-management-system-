@@ -312,7 +312,7 @@ export function ScanPage() {
             <Input
               type="number"
               min="1"
-              step="1"
+              step="any"
               value={qty}
               onChange={(e) => setQty(e.target.value)}
             />

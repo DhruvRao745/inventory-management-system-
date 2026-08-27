@@ -46,6 +46,13 @@ model Company {
   purchaseOrders PurchaseOrder[]
   invoices       Invoice[]
   customers      Customer[]
+  inventoryBatches InventoryBatch[]
+  payments       Payment[]
+  salesReturns   SalesReturn[]
+  goodsReceipts  GoodsReceipt[]
+  supplierReturns SupplierReturn[]
+  productLocationSettings ProductLocationSetting[]
+  stockCounts    StockCount[]
 }
 
 // ------------------------------------------------------------
@@ -73,6 +80,14 @@ model User {
   stockMovements StockMovement[] // movements this user recorded
   purchaseOrders PurchaseOrder[] // POs this user created
   invoices       Invoice[]       // invoices this user created
+  payments       Payment[]       // payments this user recorded
+  salesReturnsRequested SalesReturn[] @relation("ReturnRequestedBy")
+  salesReturnsApproved  SalesReturn[] @relation("ReturnApprovedBy")
+  salesReturnsReceived  SalesReturn[] @relation("ReturnReceivedBy")
+  goodsReceipts         GoodsReceipt[]
+  supplierReturns       SupplierReturn[]
+  stockCountsStarted    StockCount[] @relation("CountStartedBy")
+  stockCountsCompleted  StockCount[] @relation("CountCompletedBy")
 
   // Same email may exist at two different companies,
   // but only once within one company:
@@ -98,6 +113,11 @@ model Location {
   company        Company         @relation(fields: [companyId], references: [id])
   stockMovements StockMovement[]
   invoices       Invoice[]
+  inventoryBatches InventoryBatch[]
+  goodsReceipts  GoodsReceipt[]
+  supplierReturns SupplierReturn[]
+  productSettings ProductLocationSetting[]
+  stockCounts    StockCount[]
 
   @@unique([companyId, name])
   @@index([companyId])
@@ -124,6 +144,8 @@ model Supplier {
   company          Company         @relation(fields: [companyId], references: [id])
   purchaseOrders   PurchaseOrder[]
   preferredProducts Product[] // products that name this supplier as preferred
+  supplierReturns  SupplierReturn[]
+  locationPreferences ProductLocationSetting[]
 
   @@unique([companyId, name])
   @@index([companyId])
@@ -160,6 +182,7 @@ model PurchaseOrder {
   supplier  Supplier            @relation(fields: [supplierId], references: [id])
   createdBy User                @relation(fields: [createdById], references: [id])
   lines     PurchaseOrderLine[]
+  receipts  GoodsReceipt[]
 
   @@unique([companyId, number])
   @@index([companyId])
@@ -172,14 +195,137 @@ model PurchaseOrderLine {
   id              String  @id @default(cuid())
   purchaseOrderId String
   productId       String
-  quantity        Int // ordered quantity (always positive)
-  receivedQty     Int     @default(0) // how many have arrived so far (Phase 3)
+  quantity        Decimal @db.Decimal(18, 4) // ordered quantity (always positive)
+  receivedQty     Decimal @default(0) @db.Decimal(18, 4) // how much has arrived so far
   unitCost        Decimal @db.Decimal(12, 2) // agreed price per unit
 
   purchaseOrder PurchaseOrder @relation(fields: [purchaseOrderId], references: [id], onDelete: Cascade)
   product       Product       @relation(fields: [productId], references: [id])
+  receiptLines  GoodsReceiptLine[]
 
   @@index([purchaseOrderId])
+}
+
+// ------------------------------------------------------------
+// GOODS RECEIPT (P1-7)
+// ------------------------------------------------------------
+
+/// A delivery arriving against a purchase order.
+///
+/// WHY THIS EXISTS: receiving used to happen inline on the PO, leaving no
+/// document. You could not say "this pallet arrived on Tuesday, three units
+/// were broken, and the supplier charged more than quoted" — the only trace
+/// was a bumped counter.
+model GoodsReceipt {
+  id              String   @id @default(cuid())
+  companyId       String
+  number          Int // per-company sequence; display as GRN-0001
+  purchaseOrderId String
+  locationId      String
+  notes           String?
+  receivedById    String
+  createdAt       DateTime @default(now())
+
+  company       Company            @relation(fields: [companyId], references: [id])
+  purchaseOrder PurchaseOrder      @relation(fields: [purchaseOrderId], references: [id])
+  location      Location           @relation(fields: [locationId], references: [id])
+  receivedBy    User               @relation(fields: [receivedById], references: [id])
+  lines         GoodsReceiptLine[]
+
+  @@unique([companyId, number])
+  @@index([companyId])
+  @@index([purchaseOrderId])
+}
+
+/// One product on a delivery.
+model GoodsReceiptLine {
+  id                  String  @id @default(cuid())
+  goodsReceiptId      String
+  purchaseOrderLineId String
+  productId           String
+  /// Goods we took in. ONLY this quantity enters stock.
+  acceptedQty         Decimal @db.Decimal(18, 4)
+  /// Goods that turned up but were refused — broken, wrong item, short-dated.
+  /// Recorded so the supplier can be chased, but never becomes inventory, and
+  /// never counts towards fulfilling the order.
+  rejectedQty         Decimal @default(0) @db.Decimal(18, 4)
+  /// What we were ACTUALLY charged, which is not always what was quoted.
+  /// This is the figure that feeds the weighted average — inventory is worth
+  /// what you paid, not what you expected to pay.
+  actualUnitCost      Decimal @db.Decimal(12, 2)
+  rejectReason        String?
+  batchNumber         String?
+  manufactureDate     DateTime?
+  expiryDate          DateTime?
+
+  goodsReceipt      GoodsReceipt      @relation(fields: [goodsReceiptId], references: [id], onDelete: Cascade)
+  purchaseOrderLine PurchaseOrderLine @relation(fields: [purchaseOrderLineId], references: [id])
+  product           Product           @relation(fields: [productId], references: [id])
+  supplierReturnLines SupplierReturnLine[]
+
+  @@index([goodsReceiptId])
+  @@index([purchaseOrderLineId])
+}
+
+// ------------------------------------------------------------
+// SUPPLIER RETURNS (P1-7)
+// ------------------------------------------------------------
+
+enum SupplierReturnStatus {
+  DRAFT     // being prepared; nothing has moved
+  SENT      // goods have gone back — THIS is when stock decreases
+  COMPLETED // supplier acknowledged / credited us
+  CANCELLED
+}
+
+/// Sending goods back to a supplier.
+///
+/// Mirrors SalesReturn, in the opposite direction. Where possible it points at
+/// the goods receipt the items arrived on, so "which delivery was this from?"
+/// has an answer — PRD §10 asks for that reference explicitly.
+model SupplierReturn {
+  id             String               @id @default(cuid())
+  companyId      String
+  number         Int // per-company sequence; display as SRT-0001
+  supplierId     String
+  locationId     String
+  /// The delivery these goods came in on, where we know it.
+  goodsReceiptId String?
+  status         SupplierReturnStatus @default(DRAFT)
+  reason         String?
+  notes          String?
+  createdById    String
+  sentAt         DateTime?
+  completedAt    DateTime?
+  createdAt      DateTime             @default(now())
+  updatedAt      DateTime             @updatedAt
+
+  company   Company              @relation(fields: [companyId], references: [id])
+  supplier  Supplier             @relation(fields: [supplierId], references: [id])
+  location  Location             @relation(fields: [locationId], references: [id])
+  createdBy User                 @relation(fields: [createdById], references: [id])
+  lines     SupplierReturnLine[]
+
+  @@unique([companyId, number])
+  @@index([companyId])
+  @@index([supplierId])
+}
+
+model SupplierReturnLine {
+  id                 String  @id @default(cuid())
+  supplierReturnId   String
+  productId          String
+  quantity           Decimal @db.Decimal(18, 4)
+  unitCost           Decimal @db.Decimal(12, 2)
+  /// Which receipt line these units arrived on, where known.
+  goodsReceiptLineId String?
+  notes              String?
+
+  supplierReturn   SupplierReturn    @relation(fields: [supplierReturnId], references: [id], onDelete: Cascade)
+  product          Product           @relation(fields: [productId], references: [id])
+  goodsReceiptLine GoodsReceiptLine? @relation(fields: [goodsReceiptLineId], references: [id])
+
+  @@index([supplierReturnId])
 }
 
 // ------------------------------------------------------------
@@ -219,9 +365,57 @@ model Invoice {
   createdBy User          @relation(fields: [createdById], references: [id])
   customer  Customer?     @relation(fields: [customerId], references: [id])
   lines     InvoiceLine[]
+  payments  Payment[]
+  returns   SalesReturn[]
 
   @@unique([companyId, number])
   @@index([companyId])
+}
+
+// ------------------------------------------------------------
+// PAYMENTS (P1-5)
+// ------------------------------------------------------------
+
+enum PaymentMethod {
+  CASH
+  UPI
+  CARD
+  BANK_TRANSFER
+  OTHER
+}
+
+/// Money actually received against an invoice.
+///
+/// WHY THIS EXISTS: before P1-5 "paid" was a status someone flipped, with no
+/// record of how much arrived, when, or by what means. A half-paid invoice
+/// could not be represented at all, and "who still owes us money?" had no
+/// answer the system could give.
+///
+/// Payment state is now DERIVED from these rows (PRD §8: "Do not infer payment
+/// state only from a status field"). `Invoice.status` still shows PAID, but as
+/// a CONSEQUENCE of the payments summing to the total — never as the source of
+/// truth.
+model Payment {
+  id          String        @id @default(cuid())
+  companyId   String
+  invoiceId   String
+  amount      Decimal       @db.Decimal(12, 2)
+  method      PaymentMethod @default(CASH)
+  /// When the money actually arrived, which is not always when it was keyed
+  /// in — a cheque banked on Friday may only be recorded on Monday.
+  paymentDate DateTime      @default(now())
+  reference   String? // UPI ref, cheque number, transaction id
+  notes       String?
+  createdById String
+  createdAt   DateTime      @default(now())
+
+  company   Company @relation(fields: [companyId], references: [id])
+  invoice   Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  createdBy User    @relation(fields: [createdById], references: [id])
+
+  @@index([companyId])
+  @@index([invoiceId])
+  @@index([companyId, paymentDate])
 }
 
 /// A saved customer — like a supplier, but for who we sell to (A1).
@@ -249,13 +443,100 @@ model InvoiceLine {
   id        String  @id @default(cuid())
   invoiceId String
   productId String
-  quantity  Int
+  quantity  Decimal @db.Decimal(18, 4)
   unitPrice Decimal @db.Decimal(12, 2)
 
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id])
+  returnLines SalesReturnLine[]
 
   @@index([invoiceId])
+}
+
+// ------------------------------------------------------------
+// SALES RETURNS (P1-6)
+// ------------------------------------------------------------
+
+enum SalesReturnStatus {
+  REQUESTED // customer has asked; nothing has moved
+  APPROVED  // we've agreed to take it back
+  RECEIVED  // goods are physically here — THIS is when stock moves
+  REFUNDED  // money returned to the customer
+  CANCELLED // called off before receiving
+}
+
+/// What condition the goods came back in.
+///
+/// This is the field that decides whether stock goes back on the shelf.
+/// PRD §9: "Only sellable returned stock should increase available stock."
+enum ReturnCondition {
+  SELLABLE   // fine — can be sold again
+  DAMAGED    // broken; cannot be sold
+  QUARANTINE // needs inspection before anyone decides
+}
+
+/// A customer sending goods back, against a specific invoice.
+///
+/// WHY THIS EXISTS: before P1-6 the only way to reverse a sale was to cancel
+/// the whole invoice, which restored every line in full. A customer returning
+/// 2 of 10 items had no representation, and goods coming back broken were
+/// silently added to sellable stock — the shop would confidently try to sell
+/// them again.
+model SalesReturn {
+  id        String            @id @default(cuid())
+  companyId String
+  number    Int // per-company sequence; display as RET-0001
+  invoiceId String
+  status    SalesReturnStatus @default(REQUESTED)
+  reason    String?
+  /// What we agreed to refund. Recorded here as the decision; paying it back
+  /// is a separate act (see the note in return.service.ts).
+  refundAmount Decimal?       @db.Decimal(12, 2)
+  notes     String?
+
+  requestedById String
+  approvedById  String?
+  receivedById  String?
+  approvedAt    DateTime?
+  receivedAt    DateTime?
+  refundedAt    DateTime?
+  createdAt     DateTime      @default(now())
+  updatedAt     DateTime      @updatedAt
+
+  company     Company           @relation(fields: [companyId], references: [id])
+  invoice     Invoice           @relation(fields: [invoiceId], references: [id])
+  requestedBy User              @relation("ReturnRequestedBy", fields: [requestedById], references: [id])
+  approvedBy  User?             @relation("ReturnApprovedBy", fields: [approvedById], references: [id])
+  receivedBy  User?             @relation("ReturnReceivedBy", fields: [receivedById], references: [id])
+  lines       SalesReturnLine[]
+
+  @@unique([companyId, number])
+  @@index([companyId])
+  @@index([invoiceId])
+}
+
+/// One line of a return: which invoice line, how much, and in what state.
+model SalesReturnLine {
+  id            String          @id @default(cuid())
+  salesReturnId String
+  invoiceLineId String
+  productId     String
+  quantity      Decimal         @db.Decimal(18, 4)
+  condition     ReturnCondition @default(SELLABLE)
+  /// Whether these units go back into sellable stock.
+  ///
+  /// A decision, but a constrained one: you may decline to restock sellable
+  /// goods, but you can NEVER restock damaged or quarantined ones. Enforced in
+  /// the service and by a CHECK constraint.
+  restock       Boolean         @default(true)
+  notes         String?
+
+  salesReturn SalesReturn @relation(fields: [salesReturnId], references: [id], onDelete: Cascade)
+  invoiceLine InvoiceLine @relation(fields: [invoiceLineId], references: [id])
+  product     Product     @relation(fields: [productId], references: [id])
+
+  @@index([salesReturnId])
+  @@index([invoiceLineId])
 }
 
 // ------------------------------------------------------------
@@ -285,11 +566,43 @@ model Product {
   hsnCode           String?  // HSN/SAC tax code, printed per line on GST invoices
   categoryId          String?
   preferredSupplierId String? // usual vendor for this item (Phase 4)
-  unit              String   @default("pcs") // pcs, kg, litre... configurable per product
-  costPrice         Decimal  @default(0) @db.Decimal(12, 2) // what WE pay — Decimal, never Float, for money!
+  /// The unit stock is COUNTED in — pcs, kg, litre, metre.
+  unit              String   @default("pcs")
+  /// How many decimal places this product's quantities may have (P1-2).
+  /// 0 = whole units only (you cannot sell half a stapler).
+  /// 3 = grams-level precision on a kg-stocked product.
+  /// Enforced server-side against every quantity, so nobody can book
+  /// 0.333333 kg and leave un-sellable dust in the ledger forever.
+  precision         Int      @default(0)
+  /// Optional purchase-pack unit: "box". Purely a label.
+  packUnit          String?
+  /// How many `unit` are in one `packUnit` — 1 box = 12 pieces → 12.
+  /// Deliberately a single factor, not a full ERP unit system (PRD §6).
+  unitsPerPack      Decimal? @db.Decimal(18, 4)
+  /// The list/reference cost someone typed in. NOT accounting-grade — it is
+  /// whatever was last entered, and changing it rewrites no history.
+  /// For valuation and profit, use `avgCost` below.
+  costPrice         Decimal  @default(0) @db.Decimal(12, 2)
   sellingPrice      Decimal  @default(0) @db.Decimal(12, 2) // what the customer pays
-  lowStockThreshold Int      @default(0) // alert when stock falls below this
-  tracksBatch       Boolean  @default(false) // if true, stock-in captures batch + expiry (Phase F3)
+
+  // --- Weighted-average costing (P1-3) ------------------------------------
+  /// Running weighted-average cost per unit, company-wide for this product.
+  ///   New Average = Total Inventory Value / Total Inventory Quantity
+  /// Six decimal places, not two: ₹100 across 3 units is 33.333333, and
+  /// rounding to paise on every receipt compounds into real drift.
+  avgCost           Decimal  @default(0) @db.Decimal(18, 6)
+  /// Total value of stock on hand for this product, company-wide.
+  /// Maintained alongside avgCost so the average never has to be recomputed
+  /// by replaying the whole ledger.
+  stockValue        Decimal  @default(0) @db.Decimal(18, 4)
+  /// Alert when stock falls to/below this. Decimal since P1-2 — a 0.5 kg
+  /// threshold is as reasonable as a 5-piece one.
+  lowStockThreshold Decimal  @default(0) @db.Decimal(18, 4)
+  tracksBatch       Boolean  @default(false) // if true, stock is tracked per batch (P1-1)
+  /// How outgoing stock picks batches. FEFO (nearest expiry first) is right for
+  /// anything perishable; FIFO (oldest received first) for non-expiring goods.
+  /// Only consulted when tracksBatch is true.
+  batchStrategy     BatchStrategy @default(FEFO)
   isActive          Boolean  @default(true)
   createdAt         DateTime @default(now())
   updatedAt         DateTime @updatedAt
@@ -300,12 +613,214 @@ model Product {
   stockMovements     StockMovement[]
   purchaseOrderLines PurchaseOrderLine[]
   invoiceLines       InvoiceLine[]
+  inventoryBatches   InventoryBatch[]
+  salesReturnLines   SalesReturnLine[]
+  stockCountItems    StockCountItem[]
+  goodsReceiptLines  GoodsReceiptLine[]
+  supplierReturnLines SupplierReturnLine[]
+  locationSettings   ProductLocationSetting[]
 
   // SKU must be unique within a company (two companies can both have "SKU-001")
   @@unique([companyId, sku])
   // Barcode also unique per company (NULLs allowed — many products may lack one)
   @@unique([companyId, barcode])
   @@index([companyId])
+}
+
+// ------------------------------------------------------------
+// BATCHES (P1-1)
+// ------------------------------------------------------------
+
+/// Which batch outgoing stock is taken from first.
+enum BatchStrategy {
+  FEFO // First Expired, First Out — nearest expiry goes first (perishables)
+  FIFO // First In, First Out — oldest receipt goes first (non-expiring)
+}
+
+/// One physical lot of one product at one location.
+///
+/// The ledger answers "how many do we have?"; this answers "how many of WHICH
+/// ones, and when do they expire?". `remainingQuantity` is the live figure,
+/// decremented as stock is consumed — the one place in the system where a
+/// quantity is stored rather than summed, because a batch's identity is what
+/// makes it meaningful.
+///
+/// That storing is exactly the read-then-write pattern P0 exists to guard, so
+/// every mutation happens inside the `lockStock` advisory lock, which is keyed
+/// on (companyId, productId, locationId) — a batch's identity minus its number.
+///
+/// Quantities are Decimal(18,4) from birth so the P1-2 decimal migration never
+/// has to touch this table.
+model InventoryBatch {
+  id                String    @id @default(cuid())
+  companyId         String
+  productId         String
+  locationId        String
+  batchNumber       String
+  manufactureDate   DateTime?
+  expiryDate        DateTime? // null = does not expire
+  unitCost          Decimal   @default(0) @db.Decimal(12, 2) // cost of THIS lot
+  receivedQuantity  Decimal   @db.Decimal(18, 4) // as first received; never changes
+  remainingQuantity Decimal   @db.Decimal(18, 4) // what's left right now
+  createdAt         DateTime  @default(now())
+  updatedAt         DateTime  @updatedAt
+
+  company     Company              @relation(fields: [companyId], references: [id])
+  product     Product              @relation(fields: [productId], references: [id])
+  location    Location             @relation(fields: [locationId], references: [id])
+  allocations StockMovementBatch[]
+  countItems  StockCountItem[]
+
+  // One batch number means one lot, per product per location per company.
+  @@unique([companyId, productId, locationId, batchNumber])
+  // The FEFO scan: "oldest-expiring stock of this product here, please."
+  @@index([companyId, productId, locationId, expiryDate])
+  @@index([companyId])
+}
+
+/// Which batches one movement drew from — the split behind a single event.
+///
+/// Selling 120 across a 100-unit and an 80-unit batch stays ONE SALE movement
+/// (so SUM(quantity) is still the stock level, and the existing API shape
+/// doesn't change); the 100/20 split is recorded here.
+model StockMovementBatch {
+  id         String  @id @default(cuid())
+  movementId String
+  batchId    String
+  /// Signed, matching its parent movement: negative when consumed, positive
+  /// when added. So SUM(quantity) here per batch mirrors the batch's history.
+  quantity   Decimal @db.Decimal(18, 4)
+
+  movement StockMovement  @relation(fields: [movementId], references: [id], onDelete: Cascade)
+  batch    InventoryBatch @relation(fields: [batchId], references: [id])
+
+  @@index([movementId])
+  @@index([batchId])
+}
+
+// ------------------------------------------------------------
+// STOCK COUNTING (P1-9)
+// ------------------------------------------------------------
+
+enum StockCountStatus {
+  OPEN      // sheet prepared; expected quantities snapshotted
+  COUNTING  // staff are walking the shelves entering figures
+  REVIEW    // everything counted; someone must look at the variances
+  COMPLETED // adjustments written to the ledger
+  CANCELLED
+}
+
+/// A physical stocktake at one location.
+///
+/// THE RULE (PRD §12): "Never silently overwrite system stock."
+///
+/// Completing a count does NOT set the ledger to the counted figure. It writes
+/// ADJUSTMENT movements for the variance, so the correction is an event with a
+/// person and a time attached, and the ledger remains the single source of
+/// truth. A stocktake that quietly rewrote the numbers would destroy the audit
+/// trail that makes the ledger worth having.
+model StockCount {
+  id         String           @id @default(cuid())
+  companyId  String
+  number     Int // per-company sequence; display as CNT-0001
+  locationId String
+  status     StockCountStatus @default(OPEN)
+  notes      String?
+
+  startedById   String
+  completedById String?
+  startedAt     DateTime  @default(now())
+  completedAt   DateTime?
+  createdAt     DateTime  @default(now())
+  updatedAt     DateTime  @updatedAt
+
+  company     Company          @relation(fields: [companyId], references: [id])
+  location    Location         @relation(fields: [locationId], references: [id])
+  startedBy   User             @relation("CountStartedBy", fields: [startedById], references: [id])
+  completedBy User?            @relation("CountCompletedBy", fields: [completedById], references: [id])
+  items       StockCountItem[]
+
+  @@unique([companyId, number])
+  @@index([companyId])
+  @@index([companyId, locationId])
+}
+
+/// One line on the count sheet.
+model StockCountItem {
+  id           String  @id @default(cuid())
+  stockCountId String
+  productId    String
+  /// For batch-tracked products, which lot is being counted.
+  batchId      String?
+
+  /// What the system believed when the sheet was prepared. Snapshotted so the
+  /// variance stays meaningful even if stock moves while people are counting.
+  expectedQuantity Decimal  @db.Decimal(18, 4)
+  /// What was physically found. Null until someone counts it — which is
+  /// different from counting zero, and the difference matters.
+  countedQuantity  Decimal? @db.Decimal(18, 4)
+  notes            String?
+
+  /// NOTE: `variance` is deliberately NOT stored, though PRD §12 lists it.
+  /// It is exactly `countedQuantity − expectedQuantity` — two columns in the
+  /// same row. Storing it would add a third value that can disagree with the
+  /// two it's derived from. The API computes it on read.
+  stockCount StockCount      @relation(fields: [stockCountId], references: [id], onDelete: Cascade)
+  product    Product         @relation(fields: [productId], references: [id])
+  batch      InventoryBatch? @relation(fields: [batchId], references: [id])
+
+  @@index([stockCountId])
+}
+
+// ------------------------------------------------------------
+// REORDER SETTINGS PER LOCATION (P1-8)
+// ------------------------------------------------------------
+
+/// Reorder rules for one product at ONE location.
+///
+/// WHY THIS EXISTS (PRD §11): `Product.lowStockThreshold` is a single
+/// company-wide number, and the reorder report summed stock across every
+/// location before comparing against it. So:
+///
+///     Warehouse A: 2 units    Warehouse B: 100 units    threshold: 10
+///
+/// ...totalled 102, sailed past the threshold, and raised no warning — while
+/// Warehouse A sat nearly empty and the staff there had nothing to sell.
+/// A company total tells you nothing about the shelf someone is standing at.
+///
+/// Every field is OPTIONAL and falls back to the product-level default, so
+/// products that never set a per-location rule behave exactly as before.
+model ProductLocationSetting {
+  id         String @id @default(cuid())
+  companyId  String
+  productId  String
+  locationId String
+
+  /// Reorder when stock here falls to/below this. Falls back to
+  /// Product.lowStockThreshold.
+  minQuantity     Decimal? @db.Decimal(18, 4)
+  /// What a full shelf looks like here. Used to size the suggested order:
+  /// top back up to max rather than guessing a multiple of the minimum.
+  maxQuantity     Decimal? @db.Decimal(18, 4)
+  /// Fixed order size, where the supplier only sells in set amounts
+  /// (a pallet, a case). Overrides the max-based calculation.
+  reorderQuantity Decimal? @db.Decimal(18, 4)
+  /// Who to buy from FOR THIS LOCATION — a northern warehouse may have a
+  /// different local supplier than a southern one. Falls back to
+  /// Product.preferredSupplierId.
+  preferredSupplierId String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  company           Company   @relation(fields: [companyId], references: [id])
+  product           Product   @relation(fields: [productId], references: [id], onDelete: Cascade)
+  location          Location  @relation(fields: [locationId], references: [id], onDelete: Cascade)
+  preferredSupplier Supplier? @relation(fields: [preferredSupplierId], references: [id])
+
+  @@unique([companyId, productId, locationId])
+  @@index([companyId])
+  @@index([companyId, locationId])
 }
 
 // ------------------------------------------------------------
@@ -333,8 +848,20 @@ model StockMovement {
   productId   String
   locationId  String
   type        MovementType
-  quantity    Int          // SIGNED delta: +100 purchase, -3 sale
-  unitCost    Decimal?     @db.Decimal(12, 2) // cost at the moment of movement (for valuation)
+  /// SIGNED delta: +100 purchase, -3 sale, +2.5 kg received.
+  /// Decimal(18,4) since P1-2 — see Product.precision for how many of those
+  /// four places a given product is actually allowed to use.
+  quantity    Decimal      @db.Decimal(18, 4)
+  unitCost    Decimal?     @db.Decimal(12, 2) // what we PAID, on incoming stock
+  /// The weighted-average unit cost applied to THIS movement (P1-3).
+  ///
+  /// Stamped at the moment the movement is written and never touched again —
+  /// which is what makes COGS honest. A sale in March keeps its March cost
+  /// even after an expensive delivery in April moves the average. Because
+  /// movements are immutable, history simply cannot be rewritten.
+  ///
+  /// COGS for a period = Σ |quantity| × costAtTime over its SALE movements.
+  costAtTime  Decimal?     @db.Decimal(18, 6)
   batchNumber String?      // batch/lot code for perishables (F3)
   expiryDate  DateTime?    // when this batch expires (F3)
   reference   String?      // invoice no, PO no, reason for adjustment...
@@ -348,6 +875,9 @@ model StockMovement {
   product   Product  @relation(fields: [productId], references: [id])
   location  Location @relation(fields: [locationId], references: [id])
   createdBy User     @relation(fields: [createdById], references: [id])
+  /// For batch-tracked products: which lots this movement touched, and how
+  /// much of each. Empty for products that don't track batches.
+  batchAllocations StockMovementBatch[]
 
   // The queries we'll run constantly — make them fast:
   @@index([companyId, productId, locationId])

@@ -11,9 +11,31 @@
 import { prisma } from "../lib/prisma.js";
 
 export async function resetDb() {
+  // Children first, parents last — foreign keys refuse the delete otherwise.
+  // Invoice/PO lines cascade from their headers, but we delete them explicitly
+  // so the order stays obvious and doesn't depend on cascade rules.
+  await prisma.stockCountItem.deleteMany();
+  await prisma.stockCount.deleteMany();
+  await prisma.productLocationSetting.deleteMany();
+  await prisma.supplierReturnLine.deleteMany();
+  await prisma.supplierReturn.deleteMany();
+  await prisma.goodsReceiptLine.deleteMany();
+  await prisma.goodsReceipt.deleteMany();
+  await prisma.salesReturnLine.deleteMany();
+  await prisma.salesReturn.deleteMany();
+  await prisma.payment.deleteMany();
+  await prisma.invoiceLine.deleteMany();
+  await prisma.invoice.deleteMany();
+  await prisma.purchaseOrderLine.deleteMany();
+  await prisma.purchaseOrder.deleteMany();
+  // Batch allocations point at BOTH movements and batches, so they go first.
+  await prisma.stockMovementBatch.deleteMany();
+  await prisma.inventoryBatch.deleteMany();
   await prisma.stockMovement.deleteMany();
   await prisma.product.deleteMany();
   await prisma.category.deleteMany();
+  await prisma.customer.deleteMany();
+  await prisma.supplier.deleteMany();
   await prisma.location.deleteMany();
   await prisma.user.deleteMany();
   await prisma.company.deleteMany();

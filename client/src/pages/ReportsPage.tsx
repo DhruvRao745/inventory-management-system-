@@ -41,14 +41,27 @@ type ExpiringRow = {
   quantity: number;
   daysLeft: number;
 };
+/**
+ * One SHORT SHELF, not one short product (P1-8).
+ *
+ * A product appears once per location that's below its minimum — "Warehouse A
+ * needs 8" and "Shop needs 3" are two different jobs. The old report summed
+ * across locations, so a nearly-empty warehouse raised no warning as long as
+ * another one was full.
+ */
 type ReorderRow = {
   productId: string;
   name: string;
   sku: string;
   unit: string;
+  locationId: string;
+  locationName: string;
   onHand: number;
-  threshold: number;
+  minQuantity: number;
+  maxQuantity: number | null;
   suggestedQty: number;
+  /** True when this shelf has its own rule rather than the product default. */
+  locationSpecific: boolean;
   costPrice: string;
   preferredSupplier: { id: string; name: string } | null;
 };
@@ -63,6 +76,40 @@ type SalesReport = {
   }[];
   byCustomer: { name: string; invoices: number; revenue: number }[];
 };
+/**
+ * Revenue / COGS / gross profit (P1-3, PRD §7).
+ *
+ * These three are kept DISTINCT on purpose. The PRD is explicit that
+ * `sellingPrice − costPrice` must not be labelled accounting profit — COGS
+ * here comes from the cost stamped on each sale when it happened, so the
+ * figures don't change when today's prices do.
+ */
+type ProfitabilityRow = {
+  productId: string;
+  sku: string;
+  name: string;
+  unitsSold: number;
+  revenue: number;
+  cogs: number;
+  grossProfit: number;
+  margin: number;
+};
+type ProfitabilityReport = {
+  rows: ProfitabilityRow[];
+  totals: { revenue: number; cogs: number; grossProfit: number; margin: number };
+};
+/** Who still owes us money (P1-5) — a question the system couldn't answer before. */
+type OutstandingRow = {
+  invoiceId: string;
+  number: number;
+  customerName: string;
+  issuedAt: string | null;
+  totalAmount: number;
+  paidAmount: number;
+  balanceAmount: number;
+  paymentStatus: "UNPAID" | "PARTIAL" | "PAID" | "OVERPAID";
+};
+type OutstandingReport = { rows: OutstandingRow[]; totalOutstanding: number };
 type PurchasingReport = {
   totals: { orders: number; committedCost: number; receivedValue: number };
   byStatus: Record<string, number>;
@@ -227,13 +274,18 @@ export function ReportsPage() {
   const [sales, setSales] = useState<SalesReport | null>(null);
   const [salesError, setSalesError] = useState<string | null>(null);
 
+  const [profit, setProfit] = useState<ProfitabilityReport | null>(null);
+  const [profitError, setProfitError] = useState<string | null>(null);
+
+  const [outstanding, setOutstanding] = useState<OutstandingReport | null>(null);
+
   const navigate = useNavigate();
   const [reorder, setReorder] = useState<ReorderRow[] | null>(null);
   const [draftingId, setDraftingId] = useState<string | null>(null);
 
   async function draftPO(r: ReorderRow) {
     if (!r.preferredSupplier) return;
-    setDraftingId(r.productId);
+    setDraftingId(`${r.productId}:${r.locationId}`);
     try {
       const created = await api<{ id: string }>("/purchase-orders", {
         method: "POST",
@@ -264,6 +316,7 @@ export function ReportsPage() {
     loadSeries(firstOfMonth(), today());
     loadPurchasing(firstOfMonth(), today());
     loadSales(firstOfMonth(), today());
+    loadProfitability(firstOfMonth(), today());
     // Expiring soon is not tied to the date range — always "next 30 days".
     api<ExpiringRow[]>("/reports/expiring?days=30")
       .then(setExpiring)
@@ -271,6 +324,11 @@ export function ReportsPage() {
     api<ReorderRow[]>("/reports/reorder")
       .then(setReorder)
       .catch(() => setReorder([]));
+    // Deliberately NOT tied to the date range: an unpaid invoice is unpaid
+    // regardless of which window you're looking at.
+    api<OutstandingReport>("/payments/outstanding")
+      .then(setOutstanding)
+      .catch(() => setOutstanding({ rows: [], totalOutstanding: 0 }));
   }, []);
 
   // Same timezone-safe conversion the summary uses: the browser turns the
@@ -340,12 +398,27 @@ export function ReportsPage() {
     }
   }
 
+  async function loadProfitability(f: string, t: string) {
+    setProfitError(null);
+    try {
+      const { fromIso, toIso } = rangeToIso(f, t);
+      setProfit(
+        await api<ProfitabilityReport>(
+          `/reports/profitability?from=${encodeURIComponent(fromIso)}&to=${encodeURIComponent(toIso)}`
+        )
+      );
+    } catch (err) {
+      setProfitError(err instanceof ApiError ? err.message : "Failed to load");
+    }
+  }
+
   function handleRange(e: FormEvent) {
     e.preventDefault();
     loadSummary(from, to);
     loadSeries(from, to);
     loadPurchasing(from, to);
     loadSales(from, to);
+    loadProfitability(from, to);
   }
 
   function exportValuation() {
@@ -568,7 +641,7 @@ export function ReportsPage() {
         </SectionTitle>
         {reorder && reorder.length === 0 && (
           <div className={`${cardClass} p-6 text-sm font-bold text-[var(--muted)]`}>
-            Nothing needs reordering — all stock is above its threshold. 🎉
+            Nothing needs reordering — every location is above its minimum. 🎉
           </div>
         )}
         {reorder && reorder.length > 0 && (
@@ -577,7 +650,9 @@ export function ReportsPage() {
               <thead>
                 <tr className="border-b-2 border-[var(--line)] bg-[var(--panel)]">
                   <th className={th}>Product</th>
+                  <th className={th}>Location</th>
                   <th className={`${th} text-right`}>On hand</th>
+                  <th className={`${th} text-right`}>Minimum</th>
                   <th className={`${th} text-right`}>Suggest</th>
                   <th className={th}>Supplier</th>
                   {canOrder && <th className={th} />}
@@ -585,15 +660,37 @@ export function ReportsPage() {
               </thead>
               <tbody className="divide-y-2 divide-[var(--line)]/20">
                 {reorder.map((r) => (
-                  <tr key={r.productId} className="hover:bg-[var(--hover)]">
+                  <tr
+                    key={`${r.productId}:${r.locationId}`}
+                    className="hover:bg-[var(--hover)]"
+                  >
                     <td className={`${td} font-bold text-[var(--text)]`}>
                       {r.name}
                       <span className="ml-2 font-mono text-xs text-[var(--muted)]">
                         {r.sku}
                       </span>
                     </td>
+                    <td className={`${td} font-semibold text-[var(--text)]`}>
+                      {r.locationName}
+                      {r.locationSpecific && (
+                        <span
+                          className="ml-2 rounded-[4px] border-2 border-[var(--line)] bg-[var(--panel)] px-1.5 py-0.5 text-[10px] font-black text-[var(--muted)]"
+                          title="This location has its own reorder rule"
+                        >
+                          OWN RULE
+                        </span>
+                      )}
+                    </td>
                     <td className={`${td} text-right font-black text-red-500`}>
                       {r.onHand.toLocaleString()}
+                    </td>
+                    <td className={`${td} text-right font-semibold text-[var(--muted)]`}>
+                      {r.minQuantity.toLocaleString()}
+                      {r.maxQuantity !== null && (
+                        <span className="text-[var(--muted)]/60">
+                          {" "}/ {r.maxQuantity.toLocaleString()}
+                        </span>
+                      )}
                     </td>
                     <td className={`${td} text-right font-semibold text-[var(--muted)]`}>
                       {r.suggestedQty.toLocaleString()} {r.unit}
@@ -606,7 +703,10 @@ export function ReportsPage() {
                         <button
                           type="button"
                           onClick={() => draftPO(r)}
-                          disabled={!r.preferredSupplier || draftingId === r.productId}
+                          disabled={
+                            !r.preferredSupplier ||
+                            draftingId === `${r.productId}:${r.locationId}`
+                          }
                           className="rounded-[5px] border-2 border-[var(--line)] bg-[var(--card)] px-3 py-1 text-xs font-bold text-[var(--text)] shadow-[2px_2px_0px_var(--shadow)] hover:bg-[var(--hover)] disabled:opacity-40"
                           title={
                             r.preferredSupplier
@@ -614,7 +714,9 @@ export function ReportsPage() {
                               : "Set a preferred supplier on this product first"
                           }
                         >
-                          {draftingId === r.productId ? "…" : "Draft PO"}
+                          {draftingId === `${r.productId}:${r.locationId}`
+                            ? "…"
+                            : "Draft PO"}
                         </button>
                       </td>
                     )}
@@ -623,6 +725,230 @@ export function ReportsPage() {
               </tbody>
             </table>
           </div>
+        )}
+      </div>
+
+
+
+      {/* ---------- Outstanding balances (P1-5) ---------- */}
+      <div className="space-y-3">
+        <SectionTitle>Outstanding customer balances</SectionTitle>
+        {outstanding && outstanding.rows.length === 0 ? (
+          <div className={`${cardClass} p-6 text-sm font-bold text-[var(--muted)]`}>
+            Nothing outstanding — every issued invoice is paid in full.
+          </div>
+        ) : (
+          outstanding && (
+            <>
+              <div className={`${cardClass} p-4`}>
+                <div className="text-xs font-bold uppercase tracking-wide text-[var(--muted)]">
+                  Total owed to us
+                </div>
+                <div className="mt-1 text-2xl font-black tracking-tight text-[var(--accent)]">
+                  {formatMoney(outstanding.totalOutstanding, currency, 0)}
+                </div>
+              </div>
+              <div className={`${cardClass} overflow-x-auto`}>
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b-2 border-[var(--line)] bg-[var(--panel)]">
+                      <th className={th}>Invoice</th>
+                      <th className={th}>Customer</th>
+                      <th className={`${th} text-right`}>Total</th>
+                      <th className={`${th} text-right`}>Paid</th>
+                      <th className={`${th} text-right`}>Balance</th>
+                      <th className={th}>Status</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {outstanding.rows.map((r) => (
+                      <tr
+                        key={r.invoiceId}
+                        className="border-b border-[var(--line)] last:border-0"
+                      >
+                        <td className={`${td} font-bold`}>
+                          <button
+                            type="button"
+                            onClick={() => navigate(`/invoices/${r.invoiceId}`)}
+                            className="text-[var(--accent)] hover:underline"
+                          >
+                            INV-{String(r.number).padStart(4, "0")}
+                          </button>
+                        </td>
+                        <td className={`${td} font-bold text-[var(--text)]`}>
+                          {r.customerName}
+                        </td>
+                        <td className={`${td} text-right font-semibold text-[var(--muted)]`}>
+                          {formatMoney(r.totalAmount, currency)}
+                        </td>
+                        <td className={`${td} text-right font-semibold text-emerald-500`}>
+                          {formatMoney(r.paidAmount, currency)}
+                        </td>
+                        <td className={`${td} text-right font-black text-[var(--accent)]`}>
+                          {formatMoney(r.balanceAmount, currency)}
+                        </td>
+                        <td className={td}>
+                          <span
+                            className={`rounded-[4px] border-2 border-[var(--line)] px-2 py-0.5 text-xs font-black ${
+                              r.paymentStatus === "PARTIAL"
+                                ? "bg-amber-500 text-white"
+                                : "bg-[var(--panel)] text-[var(--muted)]"
+                            }`}
+                          >
+                            {r.paymentStatus}
+                          </span>
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )
+        )}
+      </div>
+
+      {/* ---------- Profitability (P1-3) ---------- */}
+      <div className="space-y-3">
+        <SectionTitle>Profitability</SectionTitle>
+        <p className="text-sm font-semibold text-[var(--muted)]">
+          Cost of goods sold uses the weighted-average cost recorded at the
+          moment of each sale — so these figures don&rsquo;t change when
+          today&rsquo;s prices do.
+        </p>
+        {profitError && <ErrorAlert>{profitError}</ErrorAlert>}
+        {profit && (
+          <>
+            <div className="grid grid-cols-2 gap-4 lg:grid-cols-4">
+              <div className={`${cardClass} p-4`}>
+                <div className="text-xs font-bold uppercase tracking-wide text-[var(--muted)]">
+                  Revenue
+                </div>
+                <div className="mt-1 text-2xl font-black tracking-tight text-[var(--accent)]">
+                  {formatMoney(profit.totals.revenue, currency, 0)}
+                </div>
+              </div>
+              <div className={`${cardClass} p-4`}>
+                <div className="text-xs font-bold uppercase tracking-wide text-[var(--muted)]">
+                  COGS
+                </div>
+                <div className="mt-1 text-2xl font-black tracking-tight text-[var(--text)]">
+                  {formatMoney(profit.totals.cogs, currency, 0)}
+                </div>
+              </div>
+              <div className={`${cardClass} p-4`}>
+                <div className="text-xs font-bold uppercase tracking-wide text-[var(--muted)]">
+                  Gross profit
+                </div>
+                <div
+                  className={`mt-1 text-2xl font-black tracking-tight ${
+                    profit.totals.grossProfit >= 0
+                      ? "text-emerald-500"
+                      : "text-red-500"
+                  }`}
+                >
+                  {formatMoney(profit.totals.grossProfit, currency, 0)}
+                </div>
+              </div>
+              <div className={`${cardClass} p-4`}>
+                <div className="text-xs font-bold uppercase tracking-wide text-[var(--muted)]">
+                  Margin
+                </div>
+                <div className="mt-1 text-2xl font-black tracking-tight text-[var(--text)]">
+                  {profit.totals.margin.toFixed(1)}%
+                </div>
+              </div>
+            </div>
+
+            {profit.rows.length === 0 ? (
+              <div className={`${cardClass} p-6 text-sm font-bold text-[var(--muted)]`}>
+                No sales in this period.
+              </div>
+            ) : (
+              <>
+                <div className="flex justify-end">
+                  <Button
+                    type="button"
+                    onClick={() =>
+                      downloadCsv(
+                        `profitability-${from}-to-${to}.csv`,
+                        [
+                          "SKU",
+                          "Product",
+                          "Units sold",
+                          "Revenue",
+                          "COGS",
+                          "Gross profit",
+                          "Margin %",
+                        ],
+                        profit.rows.map((r) => [
+                          r.sku,
+                          r.name,
+                          r.unitsSold,
+                          r.revenue,
+                          r.cogs,
+                          r.grossProfit,
+                          r.margin,
+                        ])
+                      )
+                    }
+                  >
+                    Export CSV
+                  </Button>
+                </div>
+                <div className={`${cardClass} overflow-x-auto`}>
+                  <table className="w-full">
+                    <thead>
+                      <tr className="border-b-2 border-[var(--line)] bg-[var(--panel)]">
+                        <th className={th}>Product</th>
+                        <th className={`${th} text-right`}>Units</th>
+                        <th className={`${th} text-right`}>Revenue</th>
+                        <th className={`${th} text-right`}>COGS</th>
+                        <th className={`${th} text-right`}>Gross profit</th>
+                        <th className={`${th} text-right`}>Margin</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {profit.rows.map((r) => (
+                        <tr
+                          key={r.productId}
+                          className="border-b border-[var(--line)] last:border-0"
+                        >
+                          <td className={`${td} font-bold text-[var(--text)]`}>
+                            {r.name}
+                            <span className="ml-2 text-xs font-semibold text-[var(--muted)]">
+                              {r.sku}
+                            </span>
+                          </td>
+                          <td className={`${td} text-right font-semibold text-[var(--muted)]`}>
+                            {r.unitsSold.toLocaleString()}
+                          </td>
+                          <td className={`${td} text-right font-semibold text-[var(--text)]`}>
+                            {formatMoney(r.revenue, currency)}
+                          </td>
+                          <td className={`${td} text-right font-semibold text-[var(--muted)]`}>
+                            {formatMoney(r.cogs, currency)}
+                          </td>
+                          <td
+                            className={`${td} text-right font-black ${
+                              r.grossProfit >= 0
+                                ? "text-emerald-500"
+                                : "text-red-500"
+                            }`}
+                          >
+                            {formatMoney(r.grossProfit, currency)}
+                          </td>
+                          <td className={`${td} text-right font-bold text-[var(--text)]`}>
+                            {r.margin.toFixed(1)}%
+                          </td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+              </>
+            )}
+          </>
         )}
       </div>
 

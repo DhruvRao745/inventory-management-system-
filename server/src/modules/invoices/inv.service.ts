@@ -3,8 +3,28 @@
  * issuing — writes SALE movements (negative quantity) into the ledger, with
  * an oversell guard so you can't invoice more than you hold at the location.
  */
+import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error.js";
+import {
+  lockStock,
+  lockCost,
+  lockCounter,
+  LOCKED_TX_OPTIONS,
+} from "../../lib/locks.js";
+import { costStockOut, costReturnIn } from "../../lib/costing.js";
+import { grandTotal, summarisePayments } from "../../lib/money.js";
+import {
+  planAllocation,
+  consumeAllocation,
+  restoreAllocationsOf,
+} from "../stock/batch.service.js";
+import {
+  Dec,
+  parseQuantity,
+  formatQuantity,
+  type Decimal,
+} from "../../lib/quantity.js";
 import type {
   CreateInvoiceInput,
   UpdateInvoiceInput,
@@ -17,21 +37,20 @@ function invRef(number: number): string {
   return `INV-${String(number).padStart(4, "0")}`;
 }
 
-// Grand total = (subtotal − discount) + tax on that amount.
-export function grandTotal(
-  subtotal: number,
-  taxRate: unknown,
-  discount: unknown
-): number {
-  const disc = Number(discount ?? 0);
-  const taxable = Math.max(0, subtotal - disc);
-  const tax = taxable * (Number(taxRate ?? 0) / 100);
-  return Math.round((taxable + tax) * 100) / 100;
-}
+// Moved to lib/money.ts in P1-5 so payment.service can use it without an
+// import cycle. Re-exported here because reports already import it from this
+// module and there's no reason to churn those call sites.
+export { grandTotal };
 
 const invInclude = {
   location: { select: { id: true, name: true } },
   createdBy: { select: { id: true, name: true } },
+  // Payments ride along so every invoice response can carry its real balance
+  // rather than making the client ask a second time (P1-5).
+  payments: {
+    orderBy: { paymentDate: "desc" },
+    include: { createdBy: { select: { id: true, name: true } } },
+  },
   lines: {
     include: {
       product: {
@@ -46,11 +65,21 @@ async function assertLocation(tx: Tx, companyId: string, locationId: string) {
   if (!loc) throw new AppError(404, "Location not found");
 }
 
+/**
+ * Confirm every product is ours and sellable, and hand back the precision
+ * details so line quantities can be validated against the right product.
+ */
 async function assertProducts(tx: Tx, companyId: string, productIds: string[]) {
   const unique = [...new Set(productIds)];
   const found = await tx.product.findMany({
     where: { id: { in: unique }, companyId },
-    select: { id: true, isActive: true },
+    select: {
+      id: true,
+      name: true,
+      unit: true,
+      precision: true,
+      isActive: true,
+    },
   });
   if (found.length !== unique.length) {
     throw new AppError(400, "One or more products don't exist");
@@ -58,6 +87,28 @@ async function assertProducts(tx: Tx, companyId: string, productIds: string[]) {
   if (found.some((p) => !p.isActive)) {
     throw new AppError(400, "Can't sell a retired product");
   }
+  return new Map(found.map((p) => [p.id, p]));
+}
+
+/**
+ * Validate every line's quantity against its own product's precision (P1-2).
+ * Done up front so a 12-line invoice can't be half-written before line 9
+ * turns out to be 0.5 of a product sold in whole units.
+ */
+function validateLineQuantities(
+  lines: { productId: string; quantity: number | string }[],
+  products: Map<
+    string,
+    { name: string; unit: string; precision: number }
+  >
+): Map<string, Decimal> {
+  const parsed = new Map<string, Decimal>();
+  lines.forEach((l, i) => {
+    const product = products.get(l.productId);
+    if (!product) throw new AppError(400, "One or more products don't exist");
+    parsed.set(`${i}`, parseQuantity(l.quantity, product));
+  });
+  return parsed;
 }
 
 export async function createInvoice(
@@ -67,11 +118,17 @@ export async function createInvoice(
 ) {
   return prisma.$transaction(async (tx) => {
     await assertLocation(tx, companyId, input.locationId);
-    await assertProducts(
+    const products = await assertProducts(
       tx,
       companyId,
       input.lines.map((l) => l.productId)
     );
+    const quantities = validateLineQuantities(input.lines, products);
+
+    // Serialize number assignment for this company. Without the lock, two
+    // simultaneous creates both read "highest is 7" and both write 8 — the
+    // unique index rejects one as an unhandled P2002 → 500.
+    await lockCounter(tx, companyId, "invoice");
 
     const last = await tx.invoice.findFirst({
       where: { companyId },
@@ -102,16 +159,16 @@ export async function createInvoice(
         discount: input.discount ?? null,
         locationId: input.locationId,
         lines: {
-          create: input.lines.map((l) => ({
+          create: input.lines.map((l, i) => ({
             productId: l.productId,
-            quantity: l.quantity,
+            quantity: quantities.get(`${i}`)!, // parsed + precision-checked
             unitPrice: l.unitPrice,
           })),
         },
       },
       include: invInclude,
     });
-  });
+  }, LOCKED_TX_OPTIONS);
 }
 
 export async function listInvoices(companyId: string, q: ListInvoiceQuery) {
@@ -146,7 +203,15 @@ export async function listInvoices(companyId: string, q: ListInvoiceQuery) {
     createdAt: inv.createdAt,
     itemCount: inv.lines.length,
     total: grandTotal(
-      inv.lines.reduce((s, l) => s + Number(l.unitPrice) * l.quantity, 0),
+      // Decimal × Decimal for the line, then out to a number once at the end.
+      // Doing it the other way — Number() per line, then multiplying — is how
+      // 2.5 kg × ₹33.33 quietly becomes ₹83.32499999999999.
+      Number(
+        inv.lines.reduce(
+          (s, l) => s.plus(l.unitPrice.times(l.quantity)),
+          new Dec(0)
+        )
+      ),
       inv.taxRate,
       inv.discount
     ),
@@ -161,7 +226,17 @@ export async function getInvoice(companyId: string, id: string) {
     include: invInclude,
   });
   if (!inv) throw new AppError(404, "Invoice not found");
-  return inv;
+
+  // The four figures PRD §8 requires, computed from the payment rows rather
+  // than read off a status flag.
+  const subtotal = inv.lines.reduce(
+    (s, l) => s.plus(l.unitPrice.times(l.quantity)),
+    new Dec(0)
+  );
+  const total = new Dec(
+    grandTotal(Number(subtotal), inv.taxRate, inv.discount)
+  );
+  return { ...inv, ...summarisePayments(total, inv.payments) };
 }
 
 export async function updateInvoice(
@@ -180,12 +255,16 @@ export async function updateInvoice(
     }
 
     if (input.locationId) await assertLocation(tx, companyId, input.locationId);
+    let quantities = new Map<string, Decimal>();
     if (input.lines) {
-      await assertProducts(
+      const products = await assertProducts(
         tx,
         companyId,
         input.lines.map((l) => l.productId)
       );
+      // Validate BEFORE deleting the old lines — otherwise a bad quantity on
+      // line 4 leaves the invoice with no lines at all.
+      quantities = validateLineQuantities(input.lines, products);
       await tx.invoiceLine.deleteMany({ where: { invoiceId: id } });
     }
 
@@ -217,9 +296,9 @@ export async function updateInvoice(
         ...(input.lines
           ? {
               lines: {
-                create: input.lines.map((l) => ({
+                create: input.lines.map((l, i) => ({
                   productId: l.productId,
-                  quantity: l.quantity,
+                  quantity: quantities.get(`${i}`)!,
                   unitPrice: l.unitPrice,
                 })),
               },
@@ -250,9 +329,38 @@ export async function issueInvoice(
       throw new AppError(409, "Only draft invoices can be issued");
     }
 
+    // Lock every shelf this invoice touches BEFORE checking any of them.
+    // Locking line-by-line inside the loop would leave earlier lines
+    // unprotected while later ones are still being read, and two invoices
+    // sharing products in different orders could deadlock. lockStock sorts.
+    await lockStock(
+      tx,
+      companyId,
+      inv.lines.map((l) => ({
+        productId: l.productId,
+        locationId: inv.locationId,
+      }))
+    );
+    // Cost locks after stock locks — same order everywhere (see lib/locks.ts).
+    await lockCost(
+      tx,
+      companyId,
+      inv.lines.map((l) => l.productId)
+    );
+
     const ref = invRef(inv.number);
 
     for (const line of inv.lines) {
+      const product = await tx.product.findUnique({
+        where: { id: line.productId },
+        select: {
+          name: true,
+          unit: true,
+          tracksBatch: true,
+          batchStrategy: true,
+        },
+      });
+
       // Oversell guard: current on-hand for this product at this location.
       const sum = await tx.stockMovement.aggregate({
         where: {
@@ -262,30 +370,53 @@ export async function issueInvoice(
         },
         _sum: { quantity: true },
       });
-      const current = sum._sum.quantity ?? 0;
-      if (current - line.quantity < 0) {
-        const p = await tx.product.findUnique({
-          where: { id: line.productId },
-          select: { name: true },
-        });
+      const current = sum._sum.quantity ?? new Dec(0);
+      if (current.lessThan(line.quantity)) {
         throw new AppError(
           400,
-          `Not enough stock of ${p?.name ?? "item"}: only ${current} at this location`
+          `Not enough stock of ${product?.name ?? "item"}: only ${formatQuantity(current)} ${product?.unit ?? ""} at this location`.trim()
         );
       }
 
-      await tx.stockMovement.create({
+      // Batch-tracked lines pick their lots by the product's strategy
+      // (FEFO by default) — planned before the write so an impossible
+      // allocation aborts the whole issue.
+      const plan = product?.tracksBatch
+        ? await planAllocation(
+            tx,
+            companyId,
+            line.productId,
+            inv.locationId,
+            line.quantity,
+            product.batchStrategy
+          )
+        : null;
+
+      // Remove value at today's average and STAMP that average on the row.
+      // This is what makes the margin on this sale permanent — a dearer
+      // delivery next week cannot retroactively change what this sale cost.
+      const costAtTime = await costStockOut(
+        tx,
+        companyId,
+        line.productId,
+        line.quantity
+      );
+
+      const movement = await tx.stockMovement.create({
         data: {
           companyId,
           productId: line.productId,
           locationId: inv.locationId,
           type: "SALE",
-          quantity: -line.quantity, // outgoing
+          quantity: line.quantity.negated(), // outgoing
+          costAtTime,
           reference: ref,
           note: `Sold on ${ref}`,
           createdById: userId,
         },
       });
+
+      if (plan) await consumeAllocation(tx, movement.id, plan);
     }
 
     return tx.invoice.update({
@@ -293,23 +424,39 @@ export async function issueInvoice(
       data: { status: "ISSUED", issuedAt: new Date() },
       include: invInclude,
     });
-  });
+  }, LOCKED_TX_OPTIONS);
 }
 
-export async function payInvoice(companyId: string, id: string) {
-  const inv = await prisma.invoice.findFirst({
-    where: { id, companyId },
-    select: { id: true, status: true },
-  });
-  if (!inv) throw new AppError(404, "Invoice not found");
+/**
+ * Mark an invoice paid IN FULL by recording a single payment for the balance.
+ *
+ * Kept because the UI and existing callers use it, but it is no longer a flag
+ * flip: it now records real money, because PRD §8 forbids payment state that
+ * isn't backed by payment rows. For partial payments or a specific method,
+ * callers should POST /api/payments directly.
+ */
+export async function payInvoice(
+  companyId: string,
+  userId: string,
+  id: string
+) {
+  const inv = await getInvoice(companyId, id);
   if (inv.status !== "ISSUED") {
     throw new AppError(409, "Only issued invoices can be marked paid");
   }
-  return prisma.invoice.update({
-    where: { id },
-    data: { status: "PAID" },
-    include: invInclude,
+  if (inv.balanceAmount.lessThanOrEqualTo(0)) {
+    throw new AppError(409, "This invoice is already fully paid");
+  }
+
+  const { recordPayment } = await import("../payments/payment.service.js");
+  await recordPayment(companyId, userId, {
+    invoiceId: id,
+    amount: Number(inv.balanceAmount),
+    method: "CASH",
+    notes: "Marked paid in full",
   });
+
+  return getInvoice(companyId, id);
 }
 
 /**
@@ -337,20 +484,69 @@ export async function cancelInvoice(
     }
 
     if (inv.status === "ISSUED") {
+      // Restoring stock can't make it negative, but we take the same locks so
+      // that "every ledger write for a shelf is serialized" holds without
+      // exception — one rule to reason about instead of two.
+      await lockStock(
+        tx,
+        companyId,
+        inv.lines.map((l) => ({
+          productId: l.productId,
+          locationId: inv.locationId,
+        }))
+      );
+      await lockCost(
+        tx,
+        companyId,
+        inv.lines.map((l) => l.productId)
+      );
+
       const ref = invRef(inv.number);
       for (const line of inv.lines) {
-        await tx.stockMovement.create({
+        // Find the sale we're undoing FIRST — it carries the cost these units
+        // left at, and that's the value that has to come back.
+        const originalSale = await tx.stockMovement.findFirst({
+          where: {
+            companyId,
+            productId: line.productId,
+            locationId: inv.locationId,
+            type: "SALE",
+            reference: ref,
+          },
+          orderBy: { createdAt: "asc" },
+        });
+
+        // Restore value at the ORIGINAL cost, not today's average. Valuing a
+        // cancellation at a newer, higher average would conjure profit out of
+        // undoing a sale — the books would gain money from nothing happening.
+        const costAtTime = await costReturnIn(
+          tx,
+          companyId,
+          line.productId,
+          line.quantity,
+          originalSale?.costAtTime ?? new Prisma.Decimal(0)
+        );
+
+        const restored = await tx.stockMovement.create({
           data: {
             companyId,
             productId: line.productId,
             locationId: inv.locationId,
             type: "RETURN_IN",
             quantity: line.quantity, // + back into stock
+            costAtTime,
             reference: ref,
             note: `Invoice ${ref} cancelled — stock restored`,
             createdById: userId,
           },
         });
+
+        // Put batch stock back into the EXACT lots it came from. Returning it
+        // to "some batch" would let a cancellation quietly launder
+        // September-expiry stock into December-expiry stock.
+        if (originalSale) {
+          await restoreAllocationsOf(tx, originalSale.id, restored.id);
+        }
       }
     }
 
@@ -359,5 +555,5 @@ export async function cancelInvoice(
       data: { status: "CANCELLED" },
       include: invInclude,
     });
-  });
+  }, LOCKED_TX_OPTIONS);
 }

@@ -4,6 +4,7 @@
  * with an Export CSV (new — exports the loaded history).
  */
 import { useEffect, useState, type FormEvent } from "react";
+import { qtyNum, formatQty } from "../lib/format";
 import { api, ApiError } from "../lib/api";
 import type { Product, Location, StockMovement } from "../lib/types";
 import { Modal } from "../components/Modal";
@@ -291,7 +292,7 @@ export function StockPage() {
                 <Input
                   type="number"
                   required
-                  step="1"
+                  step="any"
                   value={quantity}
                   onChange={(e) => setQuantity(e.target.value)}
                 />
@@ -542,10 +543,14 @@ export function StockPage() {
                     <td className={`${td} text-right`}>
                       <span
                         className={`rounded-[4px] border-2 border-[var(--line)] px-2 py-0.5 text-xs font-black text-white ${
-                          m.quantity > 0 ? "bg-emerald-500" : "bg-red-500"
+                          qtyNum(m.quantity) > 0
+                            ? "bg-emerald-500"
+                            : "bg-red-500"
                         }`}
                       >
-                        {m.quantity > 0 ? `+${m.quantity}` : m.quantity}
+                        {qtyNum(m.quantity) > 0
+                          ? `+${formatQty(m.quantity)}`
+                          : formatQty(m.quantity)}
                       </span>
                     </td>
                     <td className={`${td} font-semibold text-[var(--muted)]`}>
@@ -598,7 +603,7 @@ export function StockPage() {
                 type="number"
                 required
                 min="1"
-                step="1"
+                step="any"
                 value={tQuantity}
                 onChange={(e) => setTQuantity(e.target.value)}
               />

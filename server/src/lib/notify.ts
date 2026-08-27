@@ -13,8 +13,10 @@
 type LowStockPayload = {
   productName: string;
   sku: string;
-  onHand: number;
-  threshold: number;
+  // Strings since P1-2 — quantities are Decimal, and the caller formats them
+  // once rather than every message template re-deciding how to round.
+  onHand: string;
+  threshold: string;
   location: string;
 };
 

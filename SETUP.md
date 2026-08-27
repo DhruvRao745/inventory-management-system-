@@ -84,6 +84,59 @@ Copied from `server/.env.example`:
 
 ---
 
+## Secrets: rotation and handling
+
+`JWT_SECRET` and `JWT_REFRESH_SECRET` sign every login token. Anyone who knows
+them can forge a session as **any user in any company**. Treat them like the
+master key to every customer's data, because that is what they are.
+
+**In production the server now refuses to start** if either secret is a known
+placeholder, is shorter than 32 characters, or if the two are identical
+(`server/src/config/env.ts`). A crash at deploy time is far cheaper than a
+silent authentication bypass.
+
+### Generate a secret
+
+```bash
+node -e "console.log(require('crypto').randomBytes(48).toString('hex'))"
+```
+
+Run it once per secret — the access and refresh secrets must differ. If they
+were the same, a long-lived refresh token would also work as an access token,
+which defeats the whole point of having short-lived access tokens.
+
+### Rotating
+
+1. Generate two fresh values.
+2. Set them in the host's environment settings (Railway → service → Variables).
+   Never in a file, a commit, a ticket, or a chat window.
+3. Redeploy.
+4. Everyone is signed out — old tokens no longer verify. That is the rotation
+   working, not a bug.
+
+Rotate whenever a secret has been shown to anyone, pasted anywhere, or when
+someone with access leaves.
+
+### Consider these compromised — rotate before real use
+
+| Secret | Why |
+|---|---|
+| `JWT_SECRET` / `JWT_REFRESH_SECRET` on Railway | Ran as the literal placeholder `change-me-in-production`, which is published in `.env.example` |
+| Any secret generated in a chat session | Left the machine; assume it is known |
+| Neon database password | Appears in shell history from the migration/seed run |
+| `inventory_dev_password` | Committed in `docker-compose.yml`. Fine for local dev, never for a real server |
+
+### Never
+
+- Commit `.env` (it is git-ignored — keep it that way)
+- Put a real secret in `.env.example`
+- Share production credentials with a collaborator; they run their own local DB
+- Rely on a `${VAR:-fallback}` default for a secret. `docker-compose.prod.yml`
+  now uses `${VAR:?message}`, so a missing variable stops the deploy instead of
+  quietly booting with a publicly-known value.
+
+---
+
 ## Handy commands
 
 ```bash
