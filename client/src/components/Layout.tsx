@@ -110,6 +110,21 @@ const icons = {
       <path d="M3 12l9 4 9-4M3 17l9 4 9-4" />
     </IconBase>
   ),
+  receiving: (
+    <IconBase>
+      <path d="M3 8l9-5 9 5v8l-9 5-9-5z" />
+      <path d="M3 8l9 5 9-5" />
+      <path d="M12 13v8" />
+    </IconBase>
+  ),
+  counts: (
+    <IconBase>
+      <path d="M9 3h6v3H9z" />
+      <path d="M15 4.5h3v16H6v-16h3" />
+      <path d="M9 11l1.5 1.5L14 9" />
+      <path d="M9 16h6" />
+    </IconBase>
+  ),
   scan: (
     <IconBase>
       <path d="M4 7V5a1 1 0 0 1 1-1h2M17 4h2a1 1 0 0 1 1 1v2M20 17v2a1 1 0 0 1-1 1h-2M7 20H5a1 1 0 0 1-1-1v-2" />
@@ -151,6 +166,8 @@ const navItems = [
   { to: "/scan", label: "Scan", icon: icons.scan, color: "#06b6d4" },
   { to: "/suppliers", label: "Suppliers", icon: icons.suppliers, color: "#14b8a6" },
   { to: "/purchase-orders", label: "Purchases", icon: icons.purchases, color: "#6366f1" },
+  { to: "/receiving", label: "Receiving", icon: icons.receiving, color: "#0ea5e9" },
+  { to: "/stock-counts", label: "Stock counts", icon: icons.counts, color: "#f97316" },
   { to: "/invoices", label: "Invoices", icon: icons.invoices, color: "#eab308" },
   { to: "/returns", label: "Returns", icon: icons.returns, color: "#fb7185" },
   { to: "/customers", label: "Customers", icon: icons.customers, color: "#f43f5e" },
@@ -162,7 +179,13 @@ const navItems = [
 function titleFor(pathname: string): string {
   if (pathname === "/") return "Dashboard";
   if (pathname.startsWith("/products/")) return "Product details";
-  const item = navItems.find((n) => pathname.startsWith(n.to) && n.to !== "/");
+  // Match on a SEGMENT boundary, not a bare prefix: "/stock-counts" starts
+  // with "/stock", so a plain startsWith would title the stock-count screen
+  // "Stock" purely because that entry sits earlier in the list.
+  const item = navItems.find(
+    (n) =>
+      n.to !== "/" && (pathname === n.to || pathname.startsWith(`${n.to}/`))
+  );
   return item?.label ?? "StockPilot";
 }
 

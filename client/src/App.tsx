@@ -28,6 +28,8 @@ import { AuditPage } from "./pages/AuditPage";
 import { InvoicesPage } from "./pages/InvoicesPage";
 import { ReturnsPage } from "./pages/ReturnsPage";
 import { BatchesPage } from "./pages/BatchesPage";
+import { ReceivingPage } from "./pages/ReceivingPage";
+import { StockCountsPage } from "./pages/StockCountsPage";
 import { InvoiceDetailPage } from "./pages/InvoiceDetailPage";
 import { CustomersPage } from "./pages/CustomersPage";
 import { CustomerDetailPage } from "./pages/CustomerDetailPage";
@@ -66,6 +68,8 @@ export default function App() {
             <Route path="/invoices" element={<InvoicesPage />} />
             <Route path="/returns" element={<ReturnsPage />} />
             <Route path="/batches" element={<BatchesPage />} />
+            <Route path="/receiving" element={<ReceivingPage />} />
+            <Route path="/stock-counts" element={<StockCountsPage />} />
             <Route path="/invoices/new" element={<InvoiceDetailPage />} />
             <Route path="/invoices/:id" element={<InvoiceDetailPage />} />
             <Route path="/customers" element={<CustomersPage />} />

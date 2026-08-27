@@ -285,12 +285,12 @@ export function InvoiceDetailPage() {
     try {
       await api("/payments", {
         method: "POST",
-        body: JSON.stringify({
+        body: {
           invoiceId: id,
           amount: Number(payAmount),
           method: payMethod,
           reference: payReference.trim() || undefined,
-        }),
+        },
       });
       setPayAmount("");
       setPayReference("");

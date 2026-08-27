@@ -121,7 +121,8 @@ export function ReturnsPage() {
     try {
       await api(`/returns/${id}/${action}`, {
         method: "POST",
-        ...(body ? { body: JSON.stringify(body) } : {}),
+        // api() serialises the body itself — pass the plain object.
+        ...(body ? { body } : {}),
       });
       load();
     } catch (err) {
@@ -205,11 +206,11 @@ export function ReturnsPage() {
     try {
       await api("/returns", {
         method: "POST",
-        body: JSON.stringify({
+        body: {
           invoiceId,
           reason: reason.trim() || undefined,
           lines,
-        }),
+        },
       });
       setCreating(false);
       load();

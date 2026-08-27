@@ -1178,15 +1178,112 @@ count, cancellation touching nothing, and cross-tenant isolation.
 | 4 | Profitability reports | ✅ | ✅ | — |
 | 5 | Payments | ✅ | ✅ | 18 |
 | 6 | Sales returns | ✅ | ✅ | 26 |
-| 7 | Goods receipt + supplier returns | ✅ | ❌ | 21 |
+| 7 | Goods receipt + supplier returns | ✅ | ✅ | 21 |
 | 8 | Location-aware reordering | ✅ | ✅ | 17 |
-| 9 | Stock counting | ✅ | ❌ | 21 |
-
-**UI still owed (PRD §23):** Goods receiving, Supplier returns, Stock counts.
-
-**Still open from P0:** rotate the live JWT secrets, fix `CLIENT_ORIGIN`,
-resolve the Railway start-command override so `migrate deploy` actually runs.
+| 9 | Stock counting | ✅ | ✅ | 21 |
 
 **Still open generally:** `pretest` uses `db push`, so none of the ~34 CHECK
 constraints exist in the test database — the suite cannot catch a constraint
 regression.
+
+---
+
+# Deployment resolved
+
+Committed and pushed; Railway deployed from GitHub and came up green. Three
+things were settled in the process:
+
+**Nothing secret leaked.** `.gitignore` covered `.env` from the start — only
+`.env.example` (placeholders) was ever tracked. Worth confirming rather than
+assuming, because the cost of being wrong is a credential rotation.
+
+**Neon was never the dev database.** Every `prisma migrate dev` in this project
+ran against local Postgres; `DATABASE_URL` in `server/.env` points at
+`localhost:5432`. So the schema work and the production database had silently
+drifted 28 migrations apart.
+
+**The container started, and that meant nothing.** Railway reported "Active /
+Online" while the API threw `P2022 — column does not exist` on stock, products,
+and reports. The process booting only proves the process booted. A green
+deployment badge is not a working system, and if the health check doesn't touch
+the database, it will happily report health while every real endpoint 500s.
+Fixed by running `prisma migrate deploy` against Neon and putting it in the
+start command so it can't silently not-run again.
+
+---
+
+# UI for P1-7 and P1-9
+
+## The bug found on the way in
+
+Three call sites double-encoded their request bodies:
+
+```ts
+api("/returns", { method: "POST", body: JSON.stringify({...}) })
+```
+
+`api()` already does `JSON.stringify(options.body)`, so this produced
+`JSON.stringify(JSON.stringify(obj))` — a quoted *string*, not an object.
+`express.json()` runs strict by default and rejects a non-object at the top
+level, so **raising a sales return, recording a refund, and recording an
+invoice payment were all broken in the browser**. Verified empirically with a
+throwaway express harness: double-encoded → HTTP 400, single → HTTP 200.
+
+The lesson is about where the tests aren't. All 181 tests call service
+functions directly — they never cross HTTP, so the request body is never
+encoded at all. Every one of them passed while three user-facing actions were
+dead. **A green suite only covers the seams it actually crosses**; the
+client↔server boundary was invisible to it, which is precisely why the bug
+survived two features and a deployment.
+
+## StockCountsPage
+
+Three rules the design enforces, each protecting the count from a different
+failure:
+
+**The expected figure stays hidden until REVIEW.** Show someone "expected: 47"
+beside an empty box and a fair number will write 47 without walking to the
+shelf. The count then agrees with the system perfectly and has measured
+nothing — worse than skipping it, because now the wrong number carries
+confidence.
+
+**Blank ≠ zero.** Empty means nobody looked; `0` means someone looked and the
+shelf was empty. `countedQuantity` is nullable for exactly this reason, so the
+sheet shows a running "12 of 40 counted" and highlights untouched rows.
+
+**Completing is honest about moving stock.** The confirm lists every
+discrepancy and says how many adjustments will be written, because completing
+is a ledger event, not a save.
+
+**Backend left strict, deliberately.** `submitForReview` already refused to
+advance with uncounted lines. The lenient behaviour was considered and
+rejected: the UI now disables Submit and names the outstanding count instead of
+relaxing a server guard to suit a screen. `completeCount` still filters nulls
+defensively — belt and braces at the layer that writes.
+
+## ReceivingPage — two tabs
+
+**Deliveries** are read-only. A goods receipt is created by receiving against a
+purchase order and never standalone; a freehand delivery form would be a way to
+conjure stock from nothing. The columns emphasise **accepted** (the only
+quantity that entered stock) and **actual unit cost** (what moved the average —
+not always what was quoted).
+
+**Returns to supplier** are raised *from a delivery*, which is how "which
+shipment was this from?" gets an answer at all (PRD §10). The screen repeats
+one thing: a draft is paperwork, **stock leaves on Send**.
+
+## One quiet routing bug fixed
+
+`titleFor()` matched with `pathname.startsWith(n.to)`, so `/stock-counts`
+matched `/stock` — the new page would have shown "Stock" in the header purely
+because that entry sits earlier in the array. Now matches on a segment
+boundary. Prefix matching on paths is a trap that only springs when a later
+route happens to extend an earlier one.
+
+## Verification
+
+Client `tsc --noEmit` clean; production build clean (80 modules). The **server
+suite was not re-run here** — Prisma's engine binaries can't be downloaded in
+the sandbox (403), so tests must be run locally. Changes are client-only, so
+the expected result is an unchanged 181 passing.
