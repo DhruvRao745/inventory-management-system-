@@ -224,6 +224,15 @@ export type StockMovement = {
    * it happened and never changed. COGS is built from these.
    */
   costAtTime: string | null;
+  /**
+   * Which condition bucket this movement landed in (P2-2).
+   *
+   * Matters most on the two ADJUSTMENT rows a reclassification writes: without
+   * it the history shows a bare −5 and +5 on the same product at the same
+   * second, which reads like a mistake rather than "5 units released from
+   * quarantine".
+   */
+  status: StockStatus;
   reference: string | null;
   note: string | null;
   batchNumber: string | null;
@@ -244,9 +253,54 @@ export type StockLevel = {
     lowStockThreshold: string;
   };
   location: { id: string; name: string };
-  /** STRING since P1-2 — Decimal(18,4). */
+  /**
+   * ON HAND — everything owned at this location, in any condition.
+   * STRING since P1-2 (Decimal(18,4)).
+   *
+   * Note the name did NOT change when statuses arrived in P2-2, on purpose:
+   * every existing caller reads `quantity`, and quietly redefining it to mean
+   * "sellable" would have changed the meaning of a field under their feet.
+   */
   quantity: string;
+
+  // --- the P2 breakdown -------------------------------------------------
+  /** Good stock — the only condition that may be sold. */
+  sellable: string;
+  damaged: string;
+  quarantine: string;
+  expired: string;
+  /** Spoken for by a draft invoice; present but promised (P2-1). */
+  reserved: string;
+  /** sellable − reserved: what a NEW order can actually take. */
+  available: string;
+
+  /** Judged on `available`, not on hand — see the note in stock.service.ts. */
   lowStock: boolean;
+};
+
+/** The four conditions stock can be in (P2-2). */
+export type StockStatus = "AVAILABLE" | "DAMAGED" | "QUARANTINE" | "EXPIRED";
+
+export const STOCK_STATUS_LABELS: Record<StockStatus, string> = {
+  AVAILABLE: "Available",
+  DAMAGED: "Damaged",
+  QUARANTINE: "Quarantine",
+  EXPIRED: "Expired",
+};
+
+/** One product's condition breakdown, from /reports/stock-by-status. */
+export type StockStatusRow = {
+  productId: string;
+  sku: string;
+  name: string;
+  unit: string;
+  available: number;
+  damaged: number;
+  quarantine: number;
+  expired: number;
+  onHand: number;
+  /** Value of everything that CANNOT be sold — the point of the report. */
+  blockedValue: number;
 };
 
 /** Revenue / COGS / gross profit for a period (P1-3, PRD §7). */

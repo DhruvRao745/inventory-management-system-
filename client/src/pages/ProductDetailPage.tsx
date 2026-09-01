@@ -1,16 +1,23 @@
 /**
  * Product detail — neubrutalist edition. One product's full story.
  */
-import { useEffect, useState } from "react";
+import { useCallback, useEffect, useState } from "react";
 import { Link, useParams } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import type { Product, StockLevel, StockMovement } from "../lib/types";
+import {
+  STOCK_STATUS_LABELS,
+  type Product,
+  type StockLevel,
+  type StockMovement,
+} from "../lib/types";
 import { formatMoney, qtyNum, formatQty } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { ErrorAlert, cardClass, SectionTitle } from "../components/ui";
 import { PoRefLink } from "../components/PoRefLink";
 import { BarcodeView } from "../components/BarcodeView";
 import { TYPE_COLORS } from "../lib/colors";
+import { StockStatusBar, STATUS_COLORS } from "../components/StockStatusBar";
+import { ReclassifyModal } from "../components/ReclassifyModal";
 
 type MovementsResponse = { items: StockMovement[]; total: number };
 
@@ -20,7 +27,13 @@ const td = "px-4 py-3 text-sm";
 
 export function ProductDetailPage() {
   const { id } = useParams<{ id: string }>();
-  const { company } = useAuth();
+  const { company, user: me } = useAuth();
+  // Changing a stock condition is a judgement call with a value consequence,
+  // so it sits with the roles that already approve adjustments.
+  const canWrite = me?.role === "ADMIN" || me?.role === "MANAGER";
+
+  // Which shelf the reclassify dialog is open for, if any.
+  const [reclassifying, setReclassifying] = useState<StockLevel | null>(null);
 
   const [product, setProduct] = useState<Product | null>(null);
   const [levels, setLevels] = useState<StockLevel[]>([]);
@@ -29,7 +42,10 @@ export function ProductDetailPage() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
 
-  useEffect(() => {
+  // Pulled out of the effect so reclassifying can refresh in place — the
+  // status bar and the movement history BOTH change, and re-reading only the
+  // levels would leave the history showing yesterday's story.
+  const load = useCallback(() => {
     if (!id) return;
     setLoading(true);
     Promise.all([
@@ -48,6 +64,8 @@ export function ProductDetailPage() {
       )
       .finally(() => setLoading(false));
   }, [id]);
+
+  useEffect(load, [load]);
 
   if (loading)
     return <p className="text-sm font-bold text-[var(--muted)]">Loading…</p>;
@@ -229,26 +247,61 @@ export function ProductDetailPage() {
           </div>
         ) : (
           <div className={`${cardClass} divide-y-2 divide-[var(--line)]/20`}>
-            {levels.map((l) => (
-              <div
-                key={l.location.id}
-                className="flex items-center justify-between px-4 py-3"
-              >
-                <span className="text-sm font-bold text-[var(--text)]">
-                  {l.location.name}
-                </span>
-                <span
-                  className={`rounded-[4px] border-2 border-[var(--line)] px-2 py-0.5 text-sm font-black ${
-                    l.lowStock
-                      ? "bg-red-500 text-white"
-                      : "bg-[var(--panel)] text-[var(--text)]"
-                  }`}
-                >
-                  {l.quantity.toLocaleString()} {product.unit}
-                  {l.lowStock && " · low!"}
-                </span>
-              </div>
-            ))}
+            {levels.map((l) => {
+              // Anything that is on the shelf but cannot fill an order —
+              // reserved, damaged, quarantined or expired.
+              const blocked = qtyNum(l.quantity) - qtyNum(l.available);
+              return (
+                <div key={l.location.id} className="px-4 py-3">
+                  <div className="flex items-center justify-between gap-3">
+                    <span className="text-sm font-bold text-[var(--text)]">
+                      {l.location.name}
+                    </span>
+                    <div className="flex items-center gap-2">
+                      <span
+                        className={`rounded-[4px] border-2 border-[var(--line)] px-2 py-0.5 text-sm font-black ${
+                          l.lowStock
+                            ? "bg-red-500 text-white"
+                            : "bg-[var(--panel)] text-[var(--text)]"
+                        }`}
+                      >
+                        {/* AVAILABLE leads, not on hand. "150 on hand" is the
+                            number that gets someone to promise stock they
+                            haven't got. */}
+                        {formatQty(l.available, product.unit)} available
+                        {l.lowStock && " · low!"}
+                      </span>
+                      {canWrite && blocked > 0 && (
+                        <button
+                          type="button"
+                          onClick={() => setReclassifying(l)}
+                          className="rounded-[4px] border-2 border-[var(--line)] bg-[var(--card)] px-2 py-1 text-xs font-bold text-[var(--text)] hover:bg-[var(--hover)]"
+                        >
+                          Change condition
+                        </button>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Only shown when the shelf ISN'T simply all-good — an
+                      unbroken green bar on every row is noise that trains
+                      people to stop looking at it. */}
+                  {blocked > 0 && (
+                    <>
+                      <p className="mt-2 text-xs font-bold text-[var(--muted)]">
+                        {formatQty(l.quantity, product.unit)} on hand ·{" "}
+                        {formatQty(blocked, product.unit)} cannot be sold
+                      </p>
+                      <StockStatusBar
+                        className="mt-1.5"
+                        unit={product.unit}
+                        breakdown={l}
+                      />
+                    </>
+                  )}
+                </div>
+              );
+            })}
           </div>
         )}
       </div>
@@ -296,6 +349,18 @@ export function ProductDetailPage() {
                       >
                         {m.type}
                       </span>
+                      {/* Only shown for non-AVAILABLE stock. Tagging every
+                          ordinary movement "AVAILABLE" would be noise on 95%
+                          of rows and hide the ones that aren't. */}
+                      {m.status && m.status !== "AVAILABLE" && (
+                        <span
+                          className="ml-1 rounded-[4px] border-2 border-[var(--line)] px-1.5 py-0.5 text-[10px] font-black tracking-wide text-white"
+                          style={{ background: STATUS_COLORS[m.status] }}
+                          title={`This movement affected ${STOCK_STATUS_LABELS[m.status].toLowerCase()} stock`}
+                        >
+                          {STOCK_STATUS_LABELS[m.status].toUpperCase()}
+                        </span>
+                      )}
                     </td>
                     <td className={`${td} text-right`}>
                       <span
@@ -325,6 +390,15 @@ export function ProductDetailPage() {
           </div>
         )}
       </div>
+
+      {reclassifying && (
+        <ReclassifyModal
+          level={reclassifying}
+          productUnit={product.unit}
+          onClose={() => setReclassifying(null)}
+          onDone={load}
+        />
+      )}
     </div>
   );
 }

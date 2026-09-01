@@ -15,6 +15,20 @@ import {
   cardClass,
   SectionTitle,
 } from "../components/ui";
+import type { StockStatusRow } from "../lib/types";
+import { formatQty } from "../lib/format";
+import { STATUS_COLORS } from "../components/StockStatusBar";
+
+type StockStatusReport = {
+  rows: StockStatusRow[];
+  totals: {
+    available: number;
+    damaged: number;
+    quarantine: number;
+    expired: number;
+    blockedValue: number;
+  };
+};
 
 type ValuationRow = {
   productId: string;
@@ -258,6 +272,13 @@ export function ReportsPage() {
   const [valuation, setValuation] = useState<Valuation | null>(null);
   const [valError, setValError] = useState<string | null>(null);
 
+  // Unsellable stock (P2-2). Point-in-time like valuation, not date-ranged —
+  // "what can't I sell RIGHT NOW" is the only useful form of the question.
+  const [statusReport, setStatusReport] = useState<StockStatusReport | null>(
+    null
+  );
+  const [statusError, setStatusError] = useState<string | null>(null);
+
   const [from, setFrom] = useState(firstOfMonth());
   const [to, setTo] = useState(today());
   const [summary, setSummary] = useState<SummaryRow[] | null>(null);
@@ -311,6 +332,11 @@ export function ReportsPage() {
       .then(setValuation)
       .catch((err) =>
         setValError(err instanceof ApiError ? err.message : "Failed to load")
+      );
+    api<StockStatusReport>("/reports/stock-by-status")
+      .then(setStatusReport)
+      .catch((err) =>
+        setStatusError(err instanceof ApiError ? err.message : "Failed to load")
       );
     loadSummary(firstOfMonth(), today());
     loadSeries(firstOfMonth(), today());
@@ -448,6 +474,128 @@ export function ReportsPage() {
 
   return (
     <div className="max-w-4xl space-y-10">
+      {/* ---------- Unsellable stock (P2-2) ---------- */}
+      <div className="space-y-3">
+        <div className="flex items-baseline justify-between">
+          <SectionTitle>Stock you can't sell</SectionTitle>
+          {statusReport && statusReport.rows.length > 0 && (
+            <Button
+              variant="secondary"
+              onClick={() =>
+                downloadCsv(
+                  "unsellable-stock",
+                  ["SKU", "Product", "Available", "Quarantine", "Damaged", "Expired", "Value blocked"],
+                  statusReport.rows.map((r) => [
+                    r.sku,
+                    r.name,
+                    r.available,
+                    r.quarantine,
+                    r.damaged,
+                    r.expired,
+                    r.blockedValue,
+                  ])
+                )
+              }
+            >
+              ⬇ Download CSV
+            </Button>
+          )}
+        </div>
+
+        <p className="text-sm font-semibold text-[var(--muted)]">
+          Damaged, quarantined and expired goods are still <strong>yours</strong>{" "}
+          — they count in your valuation and a stocktake will find them. They
+          simply can't fill an order.
+        </p>
+
+        {statusError && <ErrorAlert>{statusError}</ErrorAlert>}
+
+        {statusReport && statusReport.totals.blockedValue === 0 ? (
+          <div className={`${cardClass} p-6 text-sm font-bold text-[var(--muted)]`}>
+            Nothing blocked — every unit in stock is sellable.
+          </div>
+        ) : (
+          statusReport && (
+            <>
+              {/* The headline: money, not units. "40 damaged units" means
+                  nothing without knowing what they were worth. */}
+              <div className={`${cardClass} p-5`}>
+                <div className="text-xs font-bold text-[var(--muted)]">
+                  Value tied up in stock that can't be sold
+                </div>
+                <div className="text-3xl font-black tracking-tight text-red-600">
+                  {formatMoney(statusReport.totals.blockedValue, company?.currency)}
+                </div>
+              </div>
+
+              <div className={`${cardClass} overflow-x-auto`}>
+                <table className="w-full">
+                  <thead>
+                    <tr className="border-b-2 border-[var(--line)] bg-[var(--panel)]">
+                      <th className={th}>Product</th>
+                      <th className={`${th} text-right`}>Available</th>
+                      <th className={`${th} text-right`}>Quarantine</th>
+                      <th className={`${th} text-right`}>Damaged</th>
+                      <th className={`${th} text-right`}>Expired</th>
+                      <th className={`${th} text-right`}>Value blocked</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {statusReport.rows
+                      .filter((r) => r.blockedValue > 0)
+                      .map((r) => (
+                        <tr
+                          key={r.productId}
+                          className="border-b border-[var(--line)] last:border-0"
+                        >
+                          <td className={td}>
+                            <div className="font-bold text-[var(--text)]">
+                              {r.name}
+                            </div>
+                            <div className="text-xs font-semibold text-[var(--muted)]">
+                              {r.sku}
+                            </div>
+                          </td>
+                          <td className={`${td} text-right font-semibold`}>
+                            {formatQty(r.available, r.unit)}
+                          </td>
+                          <td
+                            className={`${td} text-right font-black`}
+                            style={{
+                              color: r.quarantine > 0 ? STATUS_COLORS.QUARANTINE : undefined,
+                            }}
+                          >
+                            {r.quarantine > 0 ? formatQty(r.quarantine) : "—"}
+                          </td>
+                          <td
+                            className={`${td} text-right font-black`}
+                            style={{
+                              color: r.damaged > 0 ? STATUS_COLORS.DAMAGED : undefined,
+                            }}
+                          >
+                            {r.damaged > 0 ? formatQty(r.damaged) : "—"}
+                          </td>
+                          <td
+                            className={`${td} text-right font-black`}
+                            style={{
+                              color: r.expired > 0 ? STATUS_COLORS.EXPIRED : undefined,
+                            }}
+                          >
+                            {r.expired > 0 ? formatQty(r.expired) : "—"}
+                          </td>
+                          <td className={`${td} text-right font-black text-[var(--text)]`}>
+                            {formatMoney(r.blockedValue, company?.currency)}
+                          </td>
+                        </tr>
+                      ))}
+                  </tbody>
+                </table>
+              </div>
+            </>
+          )
+        )}
+      </div>
+
       {/* ---------- Valuation ---------- */}
       <div className="space-y-3">
         <div className="flex items-baseline justify-between">
