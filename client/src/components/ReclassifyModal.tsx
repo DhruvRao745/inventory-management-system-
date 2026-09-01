@@ -134,7 +134,23 @@ export function ReclassifyModal({
           <Field label="From" hint={`${formatQty(inBucket, productUnit)} here`}>
             <Select
               value={fromStatus}
-              onChange={(e) => setFromStatus(e.target.value as StockStatus)}
+              onChange={(e) => {
+                const next = e.target.value as StockStatus;
+                setFromStatus(next);
+                // Keep "To" out of collision with "From".
+                //
+                // The To dropdown filters out whatever From is set to. Without
+                // this, picking a From equal to the current To leaves toStatus
+                // holding a value that is no longer among To's options — and a
+                // <select> in that state DISPLAYS its first option while the
+                // state underneath is unchanged. The screen then reads
+                // "Damaged → Available" while the code sees "Damaged →
+                // Damaged", and the user is told to pick a different condition
+                // than the one they are visibly looking at.
+                if (toStatus === next) {
+                  setToStatus(ALL.find((s) => s !== next)!);
+                }
+              }}
             >
               {ALL.map((s) => (
                 <option key={s} value={s}>
