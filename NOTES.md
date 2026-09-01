@@ -1484,12 +1484,133 @@ Three, all during P2:
 
 ---
 
+---
+
+# 🏁 Phase L + §25 — the PRD's own remaining work
+
+P3 in the PRD (§27) is a bare list of seven headings under "**Future**" — no
+requirements, no acceptance criteria, nothing. The numbered phases stop at
+**Phase 16 (Reporting)**, and §24's plan stops at **Phase L**. So there was
+nothing to implement from it, and inventing a spec would have broken the
+instruction not to add features outside the PRD.
+
+What the PRD DID still specify and we hadn't done: **Phase L**, and **§25's
+Definition of Done** — item 7, "UI supports the workflow", which four P2
+features failed.
+
+## Phase L-1 — the constraints are finally under test
+
+`pretest` built the test database with `prisma db push`, which reads
+`schema.prisma`. But **Prisma's schema language cannot express CHECK
+constraints** — all 115 constraint statements live only in hand-written
+migration SQL. So production had 38 guards the test suite had never once
+exercised.
+
+Now `prisma migrate reset --force --skip-generate --skip-seed`. Three things
+that proved, beyond the tests staying green:
+
+- **The migration chain replays cleanly from empty.** Never verified before,
+  and it matters far beyond tests — it's every fresh environment and any
+  disaster recovery.
+- **All 115 constraints agree with the code.** No test was relying on data
+  production would reject.
+- **They're guarded now.** A wrong constraint will fail the suite.
+
+Cost: a drop-and-replay per run. Measured at roughly nothing.
+
+## Phase L-2 — container hardening
+
+**The Dockerfile was already right.** Its `CMD` runs `prisma migrate deploy &&
+node dist/index.js`. Railway's **Custom Start Command** override — bare `node
+dist/index.js` — is what had been suppressing it, which is why migrations were
+being applied by hand every deploy. A config problem wearing a code problem's
+clothes.
+
+Added: **non-root user** (`chown -R node:node` then `USER node` — root inside a
+container is root on the mounted filesystem), and **EXPOSE 8080** to match what
+the server actually binds, where it had said 5000.
+
+**Multi-stage build deliberately NOT done.** `prisma` is a devDependency and
+the container runs `npx prisma migrate deploy` at startup — pruning dev
+dependencies would break the start command, and it would fail at RUNTIME, not
+build time: a green build followed by a crash-looping container. Noted in the
+Dockerfile for whoever tries it later.
+
+**Also found:** Railway's **Watch Paths** were set to `/server/**`, so every
+frontend-only commit was silently SKIPPED — not failed, skipped, which is
+hidden behind "Show Skipped" by default. Two commits had never deployed. The
+dashboard showed a green ACTIVE deployment throughout; true, just not of the
+code that had been pushed.
+
+## §25 — the four features that were not "done"
+
+### GST (the one with a real bug in it)
+
+The invoice screen computed tax from `inv.taxRate` — which is **NULL on a GST
+invoice**. Every GST invoice displayed and printed with **₹0 tax**. And the
+print output hardcoded `taxRate / 2` as CGST+SGST, so an **inter-state** sale
+printed CGST/SGST on an invoice where IGST was charged: a legally wrong
+document naming the wrong governments.
+
+Both now read the STAMPED values. The client never computes GST; it renders
+what the server stored.
+
+Added: company state (Settings), per-product GST rate, customer GSTIN + state
+with the state auto-filled from the GSTIN's first two digits, an opt-in toggle
+per invoice, place of supply, per-slab breakdown in both totals blocks and the
+print, and an IGST / CGST+SGST badge.
+
+### Sessions, audit, reservations
+
+Device list with revoke, change-password, the recorded audit log with
+before/after values, and a "stock held by drafts" panel that names the invoice
+holding each unit. The reservations panel hides itself when nothing is held —
+a permanently empty card is furniture.
+
+---
+
+# Bugs found by clicking, not by tests
+
+Seven now. All passed `tsc`. All passed the full suite.
+
+1. **Double `JSON.stringify`** — returns, refunds and payments were dead in the
+   browser while 181 tests passed. Nothing crossed HTTP.
+2. **Forced AVAILABLE on outgoing movements** — would have made quarantine a
+   one-way door.
+3. **Blank SKU accepted by the service** — now constrained.
+4. **Reclassify button hidden on healthy stock** — gated on `blocked > 0`, so
+   you could only reclassify stock that had already been reclassified.
+5. **Reclassify dialog defaulted to QUARANTINE** — "0 pcs here", unusable until
+   the dropdown was changed.
+6. **To-dropdown displayed a value it wasn't set to** — a `<select>` holding a
+   value absent from its options shows the first option instead. Screen said
+   "Damaged → Available"; code saw "Damaged → Damaged".
+7. **`publicCompany()` dropped `stateCode`** — saved fine, came back as "Not
+   set". `?? null` on an optional field means a forgotten field is a silent
+   null, not a type error.
+
+**They share a shape.** Not one is a logic error — the logic was right every
+time. They are failures of REACHABILITY: a control you can't reach, a state you
+can't act from, a value you can't trust, a field that vanishes in transit.
+Tests assert what functions return. They cannot assert that a human can drive
+them, and four of these seven were invisible until someone clicked.
+
+Twice the instinct was to suspect the save, and twice the save was fine and the
+DISPLAY was wrong.
+
+---
+
 # Still open
 
-- **UI for all six P2 features.** API-first was deliberate; the screens are owed.
-- **`pretest` uses `prisma db push`**, so the **38 CHECK constraints** are never
-  exercised by the suite. They are live in production and invisible to tests.
-  Switching to `prisma migrate reset` would fix it.
-- **P3 not started:** accounting integration, purchase/sales automation,
-  forecasting, demand planning, mobile/POS, external integrations, advanced
-  analytics.
+- **`avgCost` is 0 on legacy stock**, so stock value reads ₹0 against 1,358
+  units. The weighted average only accumulates from purchases recorded after
+  P1-3 shipped. Valuation, profitability and dashboard COGS have nothing to
+  work with until some purchases are recorded with unit costs. Not a bug —
+  but it looks like one to anyone opening those reports.
+- **Railway Custom Start Command** still overrides the Dockerfile CMD. Clear it
+  and migrations apply themselves on every deploy.
+- **Railway Custom Build Command** (`npm run build --workspace=server`) is
+  dormant because the Dockerfile wins — but it would ship a server with no
+  frontend if the Dockerfile were ever renamed.
+- **P3 has no specification.** Seven headings under "Future". Needs a written
+  spec before any of it can be built.
