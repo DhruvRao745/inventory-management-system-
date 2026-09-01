@@ -67,7 +67,20 @@ export type AuditAction =
   // inventory decisions (the ledger records the movement; this records the
   // DECISION and who made it)
   | "stock.reclassify"
-  | "stock_count.complete";
+  | "stock_count.complete"
+  /**
+   * Correcting a product's weighted-average cost.
+   *
+   * Needed when a purchase was recorded at the wrong unit cost. The movement
+   * rows are NOT edited — they record what was entered at the time, and that
+   * remains true even though the figure was a mistake. What gets corrected is
+   * `avgCost`/`stockValue`, which are maintained current state rather than
+   * history.
+   *
+   * It is logged because a valuation that changes with no name and no reason
+   * attached is indistinguishable from tampering.
+   */
+  | "stock.revalue";
 
 export type AuditEntry = {
   companyId: string;
