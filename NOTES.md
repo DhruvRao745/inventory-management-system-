@@ -1600,17 +1600,77 @@ DISPLAY was wrong.
 
 ---
 
+---
+
+# Opening costs for legacy stock
+
+`avgCost` and `stockValue` are maintained by lib/costing.ts, which only began
+running at P1-3. Stock received before that contributed nothing, so the company
+held 1,358 units and reported a stock value of **₹0** — and valuation, gross
+profit and dashboard COGS were all zero with it.
+
+Nothing was broken. The costing engine had no history to work from.
+
+`prisma/backfill-costs.ts` supplies the opening balance it never got. All ten
+products resolved from **real purchase data** — the weighted average of every
+incoming movement carrying a `unitCost`. No fallbacks were needed.
+
+That replay is not an approximation: the average only moves when stock comes
+IN (selling removes value at the current average, it doesn't re-price what's
+left), so the weighted average of all purchases IS the current average.
+
+**`costAtTime` on past movements was deliberately left alone.** Backfilling it
+would make historical COGS non-zero, which looks like a fix and isn't — PRD §7
+forbids changing the cost of a completed sale, and we don't know what those
+sales cost. A plausible invented number is worse than a zero: the zero is
+visibly unknown, the invented one is indistinguishable from real data forever.
+
+Dry run is the default; `--apply` writes. A script that writes to production on
+first invocation is one keystroke from an accident.
+
+---
+
+# API contract tests — closing the seam
+
+**335 tests, 20 files.**
+
+Almost every other test calls a service function directly. Fast, precise, and
+blind to everything that happens BETWEEN the browser and the service — which is
+where **four of this project's seven bugs lived**.
+
+`modules/api-contract.test.ts` asks one question: does the wire contract hold?
+It does not re-test business logic; costing, concurrency, FEFO, GST and
+reservations are covered properly elsewhere.
+
+What it covers that nothing else could:
+
+- **`/auth/me` returns every company field** — the direct regression test for
+  the `stateCode` bug. That field saved correctly and vanished on the way out.
+  TypeScript was satisfied because `?? null` turns a forgotten optional field
+  into a valid null.
+- **Login and `/auth/me` return identical company shapes** — same helper, two
+  paths; drift means a form blank after login and populated after a refresh.
+- **A double-encoded body is rejected cleanly** — the original bug reproduced,
+  asserting a 4xx AND zero rows written, not a silent partial write.
+- **Query-string coercion** — params arrive as strings, so a schema missing its
+  `coerce` fails only over HTTP. A service test hands it real numbers.
+- **403 vs 401**, and tenancy enforced at the ROUTE rather than trusting a
+  service that is always passed the right `companyId`.
+- **No stack traces in error bodies** — a leaked trace hands over the
+  framework, the file layout and often the query.
+
+---
+
 # Still open
 
-- **`avgCost` is 0 on legacy stock**, so stock value reads ₹0 against 1,358
-  units. The weighted average only accumulates from purchases recorded after
-  P1-3 shipped. Valuation, profitability and dashboard COGS have nothing to
-  work with until some purchases are recorded with unit costs. Not a bug —
-  but it looks like one to anyone opening those reports.
-- **Railway Custom Start Command** still overrides the Dockerfile CMD. Clear it
-  and migrations apply themselves on every deploy.
-- **Railway Custom Build Command** (`npm run build --workspace=server`) is
-  dormant because the Dockerfile wins — but it would ship a server with no
-  frontend if the Dockerfile were ever renamed.
-- **P3 has no specification.** Seven headings under "Future". Needs a written
-  spec before any of it can be built.
+- **Samsung S26 Ultra is valued at ₹60,000/unit** — its purchases were recorded
+  at what looks like the SELLING price (costPrice says ₹50,000). That is a
+  ₹490,000 overvaluation on one product. If wrong, correct it with an
+  ADJUSTMENT movement rather than editing the figure — same principle as
+  everything else in the ledger.
+- **Railway Custom Start Command** still overrides the Dockerfile CMD, so
+  `migrate deploy` never runs on deploy. Clearing it ends the manual step.
+- **Railway Custom Build Command** is dormant (the Dockerfile wins) but would
+  ship a server with no frontend if the Dockerfile were ever renamed.
+- **P3 has no specification.** Seven headings under "Future" in PRD §27, with
+  no requirements anywhere in the document. Needs a written spec first.
