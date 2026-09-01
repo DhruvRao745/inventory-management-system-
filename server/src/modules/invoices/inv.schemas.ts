@@ -57,6 +57,14 @@ export const updateInvoiceSchema = z.object({
   notes: z.string().trim().nullable().optional(),
   taxRate: z.number().min(0).max(100).nullable().optional(),
   discount: z.number().nonnegative().nullable().optional(),
+  /**
+   * GST settings are editable on a DRAFT (P2-3) — switching the regime on or
+   * off, or correcting the place of supply. Without these the dropdowns saved
+   * nothing: the tax was re-stamped from the invoice's ORIGINAL place of
+   * supply, so a sale re-pointed at another state kept printing CGST/SGST.
+   */
+  useGst: z.boolean().optional(),
+  placeOfSupply: z.string().trim().length(2).nullable().optional(),
   locationId: z.string().min(1).optional(),
   lines: z.array(lineSchema).min(1, "Add at least one line").optional(),
 });

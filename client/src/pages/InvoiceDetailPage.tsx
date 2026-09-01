@@ -18,6 +18,7 @@ import { PAYMENT_METHOD_LABELS } from "../lib/types";
 import { invNumber } from "../lib/types";
 import { formatMoney, qtyNum, formatQty } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
+import { GST_STATES, stateLabel } from "../lib/gst";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { ProductPicker } from "../components/ProductPicker";
 import { InvoiceStatusPill } from "./InvoicesPage";
@@ -119,6 +120,12 @@ export function InvoiceDetailPage() {
   const [customerGstin, setCustomerGstin] = useState("");
   const [notes, setNotes] = useState("");
   const [taxRate, setTaxRate] = useState("");
+  // GST controls (P2-3). Opt-in PER INVOICE rather than a global switch, so
+  // turning GST on never changes the meaning of an invoice already raised.
+  const [useGst, setUseGst] = useState(false);
+  const [placeOfSupply, setPlaceOfSupply] = useState("");
+  const companyState = company?.stateCode ?? null;
+  const gstReady = !!companyState;
   const [discount, setDiscount] = useState("");
   const [locationId, setLocationId] = useState("");
   const [lines, setLines] = useState<LineDraft[]>([{ ...emptyLine }]);
@@ -159,6 +166,8 @@ export function InvoiceDetailPage() {
           setCustomerGstin(loaded.customerGstin ?? "");
           setNotes(loaded.notes ?? "");
           setTaxRate(loaded.taxRate ?? "");
+          setUseGst(loaded.taxMode === "GST");
+          setPlaceOfSupply(loaded.placeOfSupply ?? "");
           setDiscount(loaded.discount ?? "");
           setLocationId(loaded.location.id);
           setLines(
@@ -193,11 +202,53 @@ export function InvoiceDetailPage() {
               s + (Number(l.unitPrice) || 0) * (Number(l.quantity) || 0),
             0
           );
-    const tr =
-      !editable && inv ? Number(inv.taxRate ?? 0) : Number(taxRate) || 0;
     const disc =
       !editable && inv ? Number(inv.discount ?? 0) : Number(discount) || 0;
     const discountAmt = Math.min(Math.max(0, disc), subtotal);
+
+    // A GST invoice is READ, not recalculated (P2-3).
+    //
+    // Its tax was computed per line and stamped when the invoice was raised.
+    // Recomputing here would be wrong twice over: `inv.taxRate` is NULL on a
+    // GST invoice, so this used to display ₹0 tax on a fully-taxed bill; and
+    // even with a rate to hand, a client-side recalculation is a second
+    // implementation waiting to disagree with the stored figures the customer
+    // was actually charged.
+    // Shown while EDITING a draft too, not only on a read-only invoice.
+    //
+    // GST is computed server-side and stamped on save, so a draft being edited
+    // has real figures to display from its last save. Restricting this to
+    // read-only mode meant a saved GST draft showed "Total ₹550" with no tax
+    // at all — the invoice looked untaxed until it was issued.
+    //
+    // The numbers refresh on each save; mid-edit they describe the last saved
+    // state, which is the only honest thing to show for a figure this side
+    // cannot compute.
+    if (inv?.taxMode === "GST" && inv.gst) {
+      const g = inv.gst;
+      const cgst = Number(g.cgstAmount);
+      const sgst = Number(g.sgstAmount);
+      const igst = Number(g.igstAmount);
+      const taxableValue = Number(g.taxableValue);
+      return {
+        subtotal,
+        discountAmt,
+        // Kept for the flat-rate display path; meaningless under GST, where
+        // each line carries its own rate.
+        taxRate: 0,
+        taxAmt: cgst + sgst + igst,
+        total: taxableValue + cgst + sgst + igst,
+        gst: g,
+        isGst: true as const,
+        cgst,
+        sgst,
+        igst,
+        taxableValue,
+      };
+    }
+
+    const tr =
+      !editable && inv ? Number(inv.taxRate ?? 0) : Number(taxRate) || 0;
     const taxable = Math.max(0, subtotal - discountAmt);
     const taxAmt = (taxable * tr) / 100;
     return {
@@ -206,6 +257,12 @@ export function InvoiceDetailPage() {
       taxRate: tr,
       taxAmt,
       total: taxable + taxAmt,
+      gst: null,
+      isGst: false as const,
+      cgst: 0,
+      sgst: 0,
+      igst: 0,
+      taxableValue: taxable,
     };
   }, [editable, inv, lines, taxRate, discount]);
   const total = bill.total;
@@ -243,7 +300,9 @@ export function InvoiceDetailPage() {
       customerAddress: customerAddress || undefined,
       customerGstin: customerGstin || undefined,
       notes: notes || undefined,
-      taxRate: taxRate ? Number(taxRate) : undefined,
+      taxRate: useGst ? undefined : taxRate ? Number(taxRate) : undefined,
+      useGst: useGst || undefined,
+      placeOfSupply: useGst && placeOfSupply ? placeOfSupply : undefined,
       discount: discount ? Number(discount) : undefined,
       locationId,
       lines: clean,
@@ -255,7 +314,12 @@ export function InvoiceDetailPage() {
         const created = await api<Invoice>("/invoices", { method: "POST", body });
         navigate(`/invoices/${created.id}`);
       } else {
-        setInv(await api<Invoice>(`/invoices/${id}`, { method: "PATCH", body }));
+        // PATCH and the action endpoints return the raw invoice row. Only
+        // GET /invoices/:id attaches the derived extras — the GST breakdown
+        // and the payment summary. Trusting the write response therefore
+        // wiped the CGST/SGST lines off the screen on every save.
+        await api<Invoice>(`/invoices/${id}`, { method: "PATCH", body });
+        setInv(await api<Invoice>(`/invoices/${id}`));
       }
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : "Save failed");
@@ -267,7 +331,10 @@ export function InvoiceDetailPage() {
   async function action(path: string, failMsg: string) {
     setFormError(null);
     try {
-      setInv(await api<Invoice>(`/invoices/${id}/${path}`, { method: "POST" }));
+      await api<Invoice>(`/invoices/${id}/${path}`, { method: "POST" });
+      // Re-read for the same reason as save() — the action response carries no
+      // GST breakdown or payment summary.
+      setInv(await api<Invoice>(`/invoices/${id}`));
     } catch (err) {
       setFormError(err instanceof ApiError ? err.message : failMsg);
     }
@@ -365,9 +432,46 @@ export function InvoiceDetailPage() {
       )
       .join("");
 
-    // CGST + SGST split — half the rate each, for a sale within one state.
-    const halfRate = bill.taxRate / 2;
-    const halfTax = bill.taxAmt / 2;
+    // Tax rows for the printed bill.
+    //
+    // FLAT invoices keep the old approximation: halve the single rate and call
+    // it CGST + SGST. That assumes an intra-state sale, which is all a flat
+    // rate could ever describe.
+    //
+    // GST invoices print the amounts STAMPED on their lines, grouped by rate
+    // slab, and print IGST instead of CGST/SGST on an inter-state sale.
+    // Printing a halved rate there would produce a legally wrong document:
+    // CGST/SGST and IGST go to different governments, so showing the wrong
+    // pair misstates who was paid.
+    // Same markup as tRow below, declared here because the tax rows are built
+    // before that helper exists.
+    const taxRow = (label: string, value: string) =>
+      `<tr><td class="tl">${label}</td><td class="tv">${value}</td></tr>`;
+
+    const taxRows: string[] = [];
+    if (bill.isGst && bill.gst) {
+      for (const slab of bill.gst.byRate) {
+        const rate = Number(slab.gstRate);
+        const half = rate / 2;
+        if (Number(slab.igstAmount) > 0) {
+          taxRows.push(
+            taxRow(`IGST @ ${rate}%`, formatMoney(Number(slab.igstAmount), cur))
+          );
+        } else if (Number(slab.cgstAmount) > 0 || Number(slab.sgstAmount) > 0) {
+          taxRows.push(
+            taxRow(`CGST @ ${half}%`, formatMoney(Number(slab.cgstAmount), cur)),
+            taxRow(`SGST @ ${half}%`, formatMoney(Number(slab.sgstAmount), cur))
+          );
+        }
+      }
+    } else if (bill.taxAmt > 0) {
+      const halfRate = bill.taxRate / 2;
+      const halfTax = bill.taxAmt / 2;
+      taxRows.push(
+        taxRow(`CGST @ ${halfRate}%`, formatMoney(halfTax, cur)),
+        taxRow(`SGST @ ${halfRate}%`, formatMoney(halfTax, cur))
+      );
+    }
     const roundedTotal = Math.round(bill.total);
     const roundOff = roundedTotal - bill.total;
 
@@ -526,8 +630,7 @@ export function InvoiceDetailPage() {
             <table class="sums">
               ${tRow("Subtotal", formatMoney(bill.subtotal, cur))}
               ${bill.discountAmt > 0 ? tRow("Discount", `-${formatMoney(bill.discountAmt, cur)}`) : ""}
-              ${bill.taxAmt > 0 ? tRow(`CGST @ ${halfRate}%`, formatMoney(halfTax, cur)) : ""}
-              ${bill.taxAmt > 0 ? tRow(`SGST @ ${halfRate}%`, formatMoney(halfTax, cur)) : ""}
+              ${taxRows.join("")}
               ${Math.abs(roundOff) > 0.001 ? tRow("Round off", formatMoney(roundOff, cur)) : ""}
               ${tRow("Invoice Total", formatMoney(roundedTotal, cur), { grand: true })}
             </table>
@@ -601,6 +704,25 @@ export function InvoiceDetailPage() {
             {isNew ? "New invoice" : invNumber(inv!.number)}
           </SectionTitle>
           {inv && <InvoiceStatusPill status={inv.status} />}
+          {/* Which GST treatment applied, stated plainly. The tax lines below
+              imply it, but "why does this say IGST?" is a question worth
+              answering without arithmetic. */}
+          {inv?.taxMode === "GST" && (
+            <span
+              className="rounded-[4px] border-2 border-[var(--line)] px-1.5 py-0.5 text-[10px] font-black tracking-wide text-white"
+              style={{
+                background:
+                  inv.supplyType === "INTER_STATE" ? "#8b5cf6" : "#0ea5e9",
+              }}
+              title={
+                inv.supplyType === "INTER_STATE"
+                  ? `Inter-state sale to ${stateLabel(inv.placeOfSupply)} — charged as IGST`
+                  : `Sale within your state — charged as CGST + SGST`
+              }
+            >
+              {inv.supplyType === "INTER_STATE" ? "IGST" : "CGST+SGST"}
+            </span>
+          )}
         </div>
         {inv && (
           <div className="flex gap-3">
@@ -794,16 +916,64 @@ export function InvoiceDetailPage() {
                 onChange={(e) => setDiscount(e.target.value)}
               />
             </Field>
-            <Field label="Tax %" hint="optional">
-              <Input
-                type="number"
-                min="0"
-                max="100"
-                step="0.01"
-                value={taxRate}
-                onChange={(e) => setTaxRate(e.target.value)}
+            {/* The switch itself. Disabled until the company has a state,
+                because without one the server cannot tell an intra-state sale
+                from an inter-state one and refuses the invoice — better to
+                explain that here than to fail on submit. */}
+            <label
+              className={`flex items-start gap-2 text-sm font-bold text-[var(--text)] ${
+                gstReady ? "" : "opacity-60"
+              }`}
+            >
+              <input
+                type="checkbox"
+                className="mt-1"
+                checked={useGst}
+                disabled={!gstReady}
+                onChange={(e) => setUseGst(e.target.checked)}
               />
-            </Field>
+              <span>
+                Raise as a GST invoice
+                <span className="block text-xs font-medium text-[var(--muted)]">
+                  {gstReady
+                    ? "Tax is worked out per line from each product's GST rate, then split into CGST/SGST or IGST."
+                    : "Set your business state in Settings first — it decides CGST/SGST vs IGST."}
+                </span>
+              </span>
+            </label>
+
+            {/* Flat rate only applies when GST is off — the two are
+                alternative regimes, not layers. Showing both at once would
+                invite someone to fill in a rate that is then ignored. */}
+            {!useGst && (
+              <Field label="Tax %" hint="optional">
+                <Input
+                  type="number"
+                  min="0"
+                  max="100"
+                  step="0.01"
+                  value={taxRate}
+                  onChange={(e) => setTaxRate(e.target.value)}
+                />
+              </Field>
+            )}
+            {useGst && (
+              <Field label="Place of supply" hint="where the customer is">
+                <Select
+                  value={placeOfSupply}
+                  onChange={(e) => setPlaceOfSupply(e.target.value)}
+                >
+                  <option value="">
+                    Same as your state ({stateLabel(companyState)})
+                  </option>
+                  {GST_STATES.map((st) => (
+                    <option key={st.code} value={st.code}>
+                      {st.code} — {st.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            )}
             <Field label="Notes" hint="optional">
               <Input value={notes} onChange={(e) => setNotes(e.target.value)} />
             </Field>
@@ -821,12 +991,43 @@ export function InvoiceDetailPage() {
                   <span>−{formatMoney(bill.discountAmt, currency)}</span>
                 </div>
               )}
-              {bill.taxAmt > 0 && (
-                <div className="flex justify-between text-[var(--muted)]">
-                  <span>Tax ({bill.taxRate}%)</span>
-                  <span>{formatMoney(bill.taxAmt, currency)}</span>
-                </div>
-              )}
+              {/* GST prints per rate slab — a GST invoice is required to
+                  show tax under each rate separately, not as one figure. */}
+              {bill.isGst && bill.gst
+                ? bill.gst.byRate.map((slab) => {
+                    const rate = Number(slab.gstRate);
+                    const igst = Number(slab.igstAmount);
+                    return igst > 0 ? (
+                      <div
+                        key={slab.gstRate}
+                        className="flex justify-between text-[var(--muted)]"
+                      >
+                        <span>IGST @ {rate}%</span>
+                        <span>{formatMoney(igst, currency)}</span>
+                      </div>
+                    ) : (
+                      <div key={slab.gstRate} className="space-y-1">
+                        <div className="flex justify-between text-[var(--muted)]">
+                          <span>CGST @ {rate / 2}%</span>
+                          <span>
+                            {formatMoney(Number(slab.cgstAmount), currency)}
+                          </span>
+                        </div>
+                        <div className="flex justify-between text-[var(--muted)]">
+                          <span>SGST @ {rate / 2}%</span>
+                          <span>
+                            {formatMoney(Number(slab.sgstAmount), currency)}
+                          </span>
+                        </div>
+                      </div>
+                    );
+                  })
+                : bill.taxAmt > 0 && (
+                    <div className="flex justify-between text-[var(--muted)]">
+                      <span>Tax ({bill.taxRate}%)</span>
+                      <span>{formatMoney(bill.taxAmt, currency)}</span>
+                    </div>
+                  )}
               <div className="flex justify-between border-t-2 border-[var(--line)]/20 pt-1 text-base font-black text-[var(--text)]">
                 <span>Total</span>
                 <span>{formatMoney(bill.total, currency)}</span>
@@ -937,16 +1138,55 @@ export function InvoiceDetailPage() {
                     </td>
                   </tr>
                 )}
-                {bill.taxAmt > 0 && (
-                  <tr className="bg-[var(--panel)]">
-                    <td className="px-4 py-1 text-sm font-bold text-[var(--muted)]" colSpan={3}>
-                      Tax ({bill.taxRate}%)
-                    </td>
-                    <td className="px-4 py-1 text-right text-sm font-semibold text-[var(--muted)]">
-                      {formatMoney(bill.taxAmt, currency)}
-                    </td>
-                  </tr>
-                )}
+                {/* Per rate slab under GST; one line for a flat-rate invoice. */}
+                {bill.isGst && bill.gst
+                  ? bill.gst.byRate.flatMap((slab) => {
+                      const rate = Number(slab.gstRate);
+                      const igst = Number(slab.igstAmount);
+                      const cell =
+                        "px-4 py-1 text-sm font-bold text-[var(--muted)]";
+                      const amt =
+                        "px-4 py-1 text-right text-sm font-semibold text-[var(--muted)]";
+                      return igst > 0
+                        ? [
+                            <tr key={`i${slab.gstRate}`} className="bg-[var(--panel)]">
+                              <td className={cell} colSpan={3}>
+                                IGST @ {rate}%
+                              </td>
+                              <td className={amt}>
+                                {formatMoney(igst, currency)}
+                              </td>
+                            </tr>,
+                          ]
+                        : [
+                            <tr key={`c${slab.gstRate}`} className="bg-[var(--panel)]">
+                              <td className={cell} colSpan={3}>
+                                CGST @ {rate / 2}%
+                              </td>
+                              <td className={amt}>
+                                {formatMoney(Number(slab.cgstAmount), currency)}
+                              </td>
+                            </tr>,
+                            <tr key={`s${slab.gstRate}`} className="bg-[var(--panel)]">
+                              <td className={cell} colSpan={3}>
+                                SGST @ {rate / 2}%
+                              </td>
+                              <td className={amt}>
+                                {formatMoney(Number(slab.sgstAmount), currency)}
+                              </td>
+                            </tr>,
+                          ];
+                    })
+                  : bill.taxAmt > 0 && (
+                      <tr className="bg-[var(--panel)]">
+                        <td className="px-4 py-1 text-sm font-bold text-[var(--muted)]" colSpan={3}>
+                          Tax ({bill.taxRate}%)
+                        </td>
+                        <td className="px-4 py-1 text-right text-sm font-semibold text-[var(--muted)]">
+                          {formatMoney(bill.taxAmt, currency)}
+                        </td>
+                      </tr>
+                    )}
                 <tr className="bg-[var(--panel)]">
                   <td
                     className="px-4 py-3 text-sm font-black text-[var(--text)]"

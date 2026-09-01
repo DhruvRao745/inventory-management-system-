@@ -12,11 +12,13 @@ import { ConfirmModal } from "../components/ConfirmModal";
 import {
   Button,
   Input,
+  Select,
   Field,
   ErrorAlert,
   cardClass,
   SectionTitle,
 } from "../components/ui";
+import { GST_STATES, stateCodeFromGstin } from "../lib/gst";
 
 type ConfirmState = {
   title: string;
@@ -56,6 +58,10 @@ export function CustomersPage() {
   const [phone, setPhone] = useState("");
   const [address, setAddress] = useState("");
   const [notes, setNotes] = useState("");
+  // GST details (P2-3). stateCode is the PLACE OF SUPPLY — it is what makes an
+  // invoice to this customer intra- or inter-state.
+  const [gstin, setGstin] = useState("");
+  const [stateCode, setStateCode] = useState("");
   const [modalError, setModalError] = useState<string | null>(null);
 
   function openAdd() {
@@ -64,6 +70,8 @@ export function CustomersPage() {
     setEmail("");
     setPhone("");
     setAddress("");
+    setGstin("");
+    setStateCode("");
     setNotes("");
     setModalError(null);
     setModal("add");
@@ -75,6 +83,8 @@ export function CustomersPage() {
     setPhone(c.phone ?? "");
     setAddress(c.address ?? "");
     setNotes(c.notes ?? "");
+    setGstin(c.gstin ?? "");
+    setStateCode(c.stateCode ?? "");
     setModalError(null);
     setModal("edit");
   }
@@ -88,6 +98,8 @@ export function CustomersPage() {
       phone: phone || undefined,
       address: address || undefined,
       notes: notes || undefined,
+      gstin: gstin || undefined,
+      stateCode: stateCode || undefined,
     };
     try {
       if (modal === "add") await api("/customers", { method: "POST", body });
@@ -232,6 +244,36 @@ export function CustomersPage() {
                 onChange={(e) => setAddress(e.target.value)}
               />
             </Field>
+            <div className="grid gap-4 sm:grid-cols-2">
+              <Field label="GSTIN" hint="for B2B invoices">
+                <Input
+                  value={gstin}
+                  placeholder="27AAPFU0939F1ZV"
+                  onChange={(e) => {
+                    const next = e.target.value.toUpperCase();
+                    setGstin(next);
+                    // A GSTIN already states the customer's state in its first
+                    // two digits. Filling it in saves a step and, more
+                    // importantly, stops the two fields from disagreeing.
+                    const fromGstin = stateCodeFromGstin(next);
+                    if (fromGstin) setStateCode(fromGstin);
+                  }}
+                />
+              </Field>
+              <Field label="State" hint="place of supply">
+                <Select
+                  value={stateCode}
+                  onChange={(e) => setStateCode(e.target.value)}
+                >
+                  <option value="">Not set</option>
+                  {GST_STATES.map((st) => (
+                    <option key={st.code} value={st.code}>
+                      {st.code} — {st.name}
+                    </option>
+                  ))}
+                </Select>
+              </Field>
+            </div>
             <Field label="Notes" hint="optional">
               <Input value={notes} onChange={(e) => setNotes(e.target.value)} />
             </Field>

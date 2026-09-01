@@ -16,6 +16,8 @@ export type Product = {
   name: string;
   description: string | null;
   hsnCode: string | null;
+  /** GST rate % for this product (P2-3). Rate follows the goods, not the invoice. */
+  gstRate: string | null;
   categoryId: string | null;
   category: Category | null;
   preferredSupplierId: string | null;
@@ -89,6 +91,10 @@ export type Customer = {
   email: string | null;
   phone: string | null;
   address: string | null;
+  /** Buyer's GST registration, for B2B invoices (P2-3). */
+  gstin: string | null;
+  /** Buyer's state code — the place of supply, which decides CGST/SGST vs IGST. */
+  stateCode: string | null;
   notes: string | null;
   isActive: boolean;
   createdAt: string;
@@ -164,6 +170,19 @@ export type InvoiceLine = {
   /** STRING since P1-2 — Decimal(18,4). Convert with Number() only to display. */
   quantity: string;
   unitPrice: string;
+
+  // --- GST, STAMPED at write time (P2-3) --------------------------------
+  //
+  // Null on every invoice raised before GST, and on flat-rate invoices. These
+  // are read, never recomputed: an issued invoice keeps the tax it was issued
+  // with even after a rate changes.
+  hsnCode: string | null;
+  gstRate: string | null;
+  taxableValue: string | null;
+  cgstAmount: string | null;
+  sgstAmount: string | null;
+  igstAmount: string | null;
+
   product: {
     id: string;
     sku: string;
@@ -171,6 +190,31 @@ export type InvoiceLine = {
     unit: string;
     hsnCode: string | null;
   };
+};
+
+/** Which tax regime an invoice was raised under (P2-3). */
+export type TaxMode = "FLAT" | "GST";
+export type SupplyType = "INTRA_STATE" | "INTER_STATE";
+
+/**
+ * The GST summary the server attaches to a GST invoice, built from the
+ * STAMPED line amounts. Null on flat-rate invoices.
+ */
+export type InvoiceGst = {
+  supplyType: SupplyType | null;
+  taxableValue: string;
+  cgstAmount: string;
+  sgstAmount: string;
+  igstAmount: string;
+  totalTax: string;
+  /** A GST invoice must show tax under each rate slab separately. */
+  byRate: {
+    gstRate: string;
+    taxableValue: string;
+    cgstAmount: string;
+    sgstAmount: string;
+    igstAmount: string;
+  }[];
 };
 
 export type Invoice = {
@@ -185,6 +229,17 @@ export type Invoice = {
   notes: string | null;
   taxRate: string | null;
   discount: string | null;
+
+  // --- GST (P2-3) --------------------------------------------------------
+  /** FLAT = legacy whole-invoice rate. GST = per-line CGST/SGST/IGST. */
+  taxMode: TaxMode;
+  /** Buyer's state code as it stood when invoiced. */
+  placeOfSupply: string | null;
+  supplyType: SupplyType | null;
+  /** Present on GET /invoices/:id when taxMode is GST. */
+  gst?: InvoiceGst | null;
+  subtotal?: string;
+
   issuedAt: string | null;
   createdAt: string;
   updatedAt: string;

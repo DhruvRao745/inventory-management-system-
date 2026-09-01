@@ -15,6 +15,7 @@ import {
   cardClass,
   SectionTitle,
 } from "../components/ui";
+import { AuditLogPanel } from "../components/AuditLogPanel";
 
 type AuditEvent = {
   id: string;
@@ -81,7 +82,12 @@ export function AuditPage() {
   }
 
   return (
-    <div className="max-w-4xl space-y-5">
+    <div className="max-w-4xl space-y-8">
+      {/* The RECORDED log (P2-6) sits above the inferred feed — it holds the
+          events that leave no trace anywhere else, so it is the one people
+          actually come here for. */}
+      <AuditLogPanel />
+
       <SectionTitle>
         Activity{" "}
         <span className="font-bold normal-case tracking-normal text-[var(--muted)]/60">

@@ -13,7 +13,7 @@
     "start": "node dist/index.js",
     "prisma:migrate": "prisma migrate dev",
     "prisma:studio": "prisma studio",
-    "pretest": "cross-env DATABASE_URL=postgresql://inventory:inventory_dev_password@localhost:5432/inventory_test prisma db push --skip-generate",
+    "pretest": "cross-env DATABASE_URL=postgresql://inventory:inventory_dev_password@localhost:5432/inventory_test prisma migrate reset --force --skip-generate --skip-seed",
     "test": "cross-env DATABASE_URL=postgresql://inventory:inventory_dev_password@localhost:5432/inventory_test JWT_SECRET=test-only-secret JWT_REFRESH_SECRET=test-only-refresh vitest run",
     "test:watch": "cross-env DATABASE_URL=postgresql://inventory:inventory_dev_password@localhost:5432/inventory_test JWT_SECRET=test-only-secret JWT_REFRESH_SECRET=test-only-refresh vitest"
   },

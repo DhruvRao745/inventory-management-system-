@@ -8,6 +8,7 @@ import { Link } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import type { Product, StockLevel, Supplier } from "../lib/types";
 import { useAuth } from "../context/AuthContext";
+import { COMMON_GST_RATES } from "../lib/gst";
 import { Modal } from "../components/Modal";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { hashColor } from "../lib/colors";
@@ -34,6 +35,7 @@ const emptyForm = {
   name: "",
   description: "",
   hsnCode: "",
+  gstRate: "",
   categoryId: "",
   preferredSupplierId: "",
   unit: "pcs",
@@ -192,6 +194,7 @@ export function ProductsPage() {
       name: p.name,
       description: p.description ?? "",
       hsnCode: p.hsnCode ?? "",
+      gstRate: p.gstRate ?? "",
       categoryId: p.categoryId ?? "",
       preferredSupplierId: p.preferredSupplierId ?? "",
       unit: p.unit,
@@ -266,6 +269,9 @@ export function ProductsPage() {
       name: form.name,
       description: form.description || undefined,
       hsnCode: form.hsnCode || undefined,
+      // "" means "not set" — send undefined so the server leaves it alone,
+      // rather than 0, which is a real rate meaning nil-rated goods.
+      gstRate: form.gstRate === "" ? undefined : Number(form.gstRate),
       categoryId: form.categoryId,
       preferredSupplierId: form.preferredSupplierId,
       unit: form.unit,
@@ -682,6 +688,28 @@ export function ProductsPage() {
                 />
               </Field>
             </div>
+
+            {/* The rate lives on the PRODUCT because it follows the goods: a
+                shop selling books at 5% and electronics at 28% cannot be
+                described by any single invoice-level rate. It is copied onto
+                each invoice line when the invoice is raised, so changing it
+                here never alters an invoice already issued. */}
+            <Field
+              label="GST rate %"
+              hint="copied onto invoices at the time of sale"
+            >
+              <Select
+                value={form.gstRate}
+                onChange={(e) => setField("gstRate", e.target.value)}
+              >
+                <option value="">Not set</option>
+                {COMMON_GST_RATES.map((r) => (
+                  <option key={r} value={String(r)}>
+                    {r}%{r === 0 ? " (nil-rated)" : ""}
+                  </option>
+                ))}
+              </Select>
+            </Field>
             <Field label="Category" hint="optional">
               <Select
                 value={form.categoryId}

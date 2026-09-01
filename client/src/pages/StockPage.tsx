@@ -22,6 +22,7 @@ import {
   cardClass,
   SectionTitle,
 } from "../components/ui";
+import { ReservationsPanel } from "../components/ReservationsPanel";
 
 const MOVEMENT_TYPES = [
   { value: "PURCHASE", label: "Purchase (stock in)" },
@@ -400,6 +401,10 @@ export function StockPage() {
           )}
         </div>
       </div>
+
+      {/* What's currently promised to draft invoices (P2-1). Hides itself
+          when nothing is held. */}
+      <ReservationsPanel />
 
       {/* History */}
       <div className="space-y-3">

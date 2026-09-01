@@ -1,0 +1,24 @@
+<!--
+  Tab icon — the same cube mark as the sidebar logo (components/ui.tsx).
+
+  SVG rather than .ico: one file, sharp at any size, and no binary blob in the
+  repo. Every browser that runs this app supports it.
+
+  Its real job is smaller than it looks — without a favicon the browser asks
+  for /favicon.ico on every page load and logs a 404, which trains people to
+  ignore console errors. A console with one permanent error in it is a console
+  nobody reads.
+-->
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 24 24" width="32" height="32">
+  <rect width="24" height="24" rx="5" fill="#2d8cf0" />
+  <g
+    fill="none"
+    stroke="#ffffff"
+    stroke-width="1.8"
+    stroke-linecap="round"
+    stroke-linejoin="round"
+  >
+    <path d="M12 5l6 3.4v6.8L12 19l-6-3.8V8.4L12 5z" />
+    <path d="M12 12l6-3.4M12 12v7M12 12L6 8.6" />
+  </g>
+</svg>

@@ -651,6 +651,18 @@ export async function updateInvoice(
         notes: input.notes === undefined ? undefined : input.notes,
         taxRate: input.taxRate === undefined ? undefined : input.taxRate,
         discount: input.discount === undefined ? undefined : input.discount,
+        // GST settings on a DRAFT (P2-3). These have to be written BEFORE
+        // stampGst runs below, because stampGst reads the invoice back from
+        // the database — it recomputes from what is stored, not from `input`.
+        // Missing them meant the tax was re-stamped against the invoice's
+        // original place of supply, so re-pointing a sale at another state
+        // silently kept charging CGST/SGST instead of IGST.
+        ...(input.useGst === undefined
+          ? {}
+          : { taxMode: input.useGst ? ("GST" as const) : ("FLAT" as const) }),
+        ...(input.placeOfSupply === undefined
+          ? {}
+          : { placeOfSupply: input.placeOfSupply }),
         locationId: input.locationId,
         ...(input.lines
           ? {

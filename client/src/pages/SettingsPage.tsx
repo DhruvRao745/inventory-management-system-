@@ -6,8 +6,10 @@ import { useEffect, useState, type FormEvent } from "react";
 import { api, ApiError } from "../lib/api";
 import type { Location } from "../lib/types";
 import { useAuth } from "../context/AuthContext";
+import { GST_STATES } from "../lib/gst";
 import { Modal } from "../components/Modal";
 import { ConfirmModal } from "../components/ConfirmModal";
+import { SecurityPanel } from "../components/SecurityPanel";
 import {
   Button,
   Input,
@@ -52,6 +54,9 @@ export function SettingsPage() {
   const [coEmail, setCoEmail] = useState(company?.email ?? "");
   const [coGstin, setCoGstin] = useState(company?.gstin ?? "");
   const [coPan, setCoPan] = useState(company?.pan ?? "");
+  // The single field that decides CGST+SGST vs IGST on every invoice (P2-3).
+  // Without it the server refuses to raise a GST invoice at all.
+  const [coStateCode, setCoStateCode] = useState(company?.stateCode ?? "");
   const [coSeal, setCoSeal] = useState(company?.sealText ?? "");
   const [coTerms, setCoTerms] = useState(company?.invoiceTerms ?? "");
   const [coError, setCoError] = useState<string | null>(null);
@@ -73,6 +78,7 @@ export function SettingsPage() {
           email: coEmail,
           gstin: coGstin,
           pan: coPan,
+          stateCode: coStateCode,
           sealText: coSeal,
           invoiceTerms: coTerms,
         },
@@ -294,6 +300,29 @@ export function SettingsPage() {
                     />
                   </Field>
                 </div>
+
+                <Field
+                  label="Business state"
+                  hint="required for GST invoices"
+                >
+                  <Select
+                    value={coStateCode}
+                    onChange={(e) => setCoStateCode(e.target.value)}
+                  >
+                    <option value="">Not set</option>
+                    {GST_STATES.map((st) => (
+                      <option key={st.code} value={st.code}>
+                        {st.code} — {st.name}
+                      </option>
+                    ))}
+                  </Select>
+                </Field>
+                <p className="-mt-2 text-xs font-semibold text-[var(--muted)]">
+                  GST splits by where the <strong>customer</strong> is relative
+                  to you: same state charges CGST + SGST, another state charges
+                  IGST. Without your state we can't tell the two apart, so GST
+                  invoicing stays switched off until this is set.
+                </p>
                 <Field
                   label="Seal text"
                   hint="one line inside the round stamp — e.g. For Demo Traders"
@@ -384,6 +413,9 @@ export function SettingsPage() {
           ))}
         </div>
       </div>
+
+      {/* ---------- Security (P2-5) ---------- */}
+      <SecurityPanel />
 
       {/* ---------- Team ---------- */}
       <div className="space-y-3">

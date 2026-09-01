@@ -39,6 +39,8 @@ export type Company = {
   email: string | null;
   gstin: string | null;
   pan: string | null;
+  /** GST state code (P2-3). Decides CGST+SGST vs IGST on every invoice. */
+  stateCode: string | null;
   sealText: string | null;
   invoiceTerms: string | null;
 };

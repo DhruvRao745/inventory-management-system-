@@ -89,6 +89,15 @@ function publicCompany(company: {
   email?: string | null;
   gstin?: string | null;
   pan?: string | null;
+  /**
+   * GST state code (P2-3).
+   *
+   * This shape is what /auth/me and login return, and the client seeds the
+   * Settings form from it. A field missing here reads as "not set" on screen
+   * however correct the database is — which is exactly how it was lost the
+   * first time.
+   */
+  stateCode?: string | null;
   sealText?: string | null;
   invoiceTerms?: string | null;
 }) {
@@ -101,6 +110,7 @@ function publicCompany(company: {
     email: company.email ?? null,
     gstin: company.gstin ?? null,
     pan: company.pan ?? null,
+    stateCode: company.stateCode ?? null,
     sealText: company.sealText ?? null,
     invoiceTerms: company.invoiceTerms ?? null,
   };
