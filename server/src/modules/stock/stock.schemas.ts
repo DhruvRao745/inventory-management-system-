@@ -21,6 +21,17 @@ export const createMovementSchema = z
     // Accepts a string too, so a client can send "2.5" without a float
     // round-trip mangling it.
     quantity: z.union([z.number(), z.string().trim().min(1)]),
+    /**
+     * What CONDITION this stock is in (P2-2). Defaults to AVAILABLE.
+     *
+     * Only meaningful on INCOMING stock — you receive goods into quarantine,
+     * or book a damaged return into the damaged bucket. Outgoing movements
+     * take their status from the stock they consume, not from the request,
+     * which is why the service overrides this for sales.
+     */
+    status: z
+      .enum(["AVAILABLE", "DAMAGED", "QUARANTINE", "EXPIRED"])
+      .optional(),
     unitCost: z.number().nonnegative().optional(),
     reference: z.string().trim().optional(), // invoice / PO number
     note: z.string().trim().optional(),
@@ -112,6 +123,39 @@ export const batchQuerySchema = z.object({
   expiringInDays: z.coerce.number().int().min(0).max(3650).optional(),
 });
 
+const stockStatusEnum = z.enum([
+  "AVAILABLE",
+  "DAMAGED",
+  "QUARANTINE",
+  "EXPIRED",
+]);
+
+/**
+ * Moving stock between conditions (P2-2) — quarantine released, goods found
+ * broken, expired stock written off.
+ */
+export const reclassifySchema = z
+  .object({
+    productId: z.string().min(1),
+    locationId: z.string().min(1),
+    // Always positive: this is "move 5 units across", never a signed delta.
+    // The service writes the negative half itself.
+    quantity: z.union([z.number().positive(), z.string().trim().min(1)]),
+    fromStatus: stockStatusEnum,
+    toStatus: stockStatusEnum,
+    note: z.string().trim().max(300).optional(),
+  })
+  .superRefine((data, ctx) => {
+    if (data.fromStatus === data.toStatus) {
+      ctx.addIssue({
+        code: z.ZodIssueCode.custom,
+        path: ["toStatus"],
+        message: "Choose a different status to move the stock to",
+      });
+    }
+  });
+
+export type ReclassifyInput = z.infer<typeof reclassifySchema>;
 export type CreateMovementInput = z.infer<typeof createMovementSchema>;
 export type TransferInput = z.infer<typeof transferSchema>;
 export type ListMovementsQuery = z.infer<typeof listMovementsQuerySchema>;

@@ -14,6 +14,9 @@ export async function resetDb() {
   // Children first, parents last — foreign keys refuse the delete otherwise.
   // Invoice/PO lines cascade from their headers, but we delete them explicitly
   // so the order stays obvious and doesn't depend on cascade rules.
+  await prisma.auditLog.deleteMany();
+  await prisma.session.deleteMany();
+  await prisma.stockReservation.deleteMany();
   await prisma.stockCountItem.deleteMany();
   await prisma.stockCount.deleteMany();
   await prisma.productLocationSetting.deleteMany();

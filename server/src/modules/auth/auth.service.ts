@@ -13,6 +13,16 @@ import { env } from "../../config/env.js";
 import { AppError } from "../../middleware/error.js";
 import type { RegisterInput, LoginInput } from "./auth.schemas.js";
 import type { AuthPayload } from "../../middleware/auth.js";
+import {
+  createSession,
+  rotateSession,
+  revokeSession,
+  revokeAllForUser,
+  listSessions,
+  SessionError,
+  type SessionContext,
+} from "../../lib/sessions.js";
+import { recordSecurityEvent } from "../../lib/audit.js";
 
 /**
  * Two badges:
@@ -25,15 +35,29 @@ function signAccessToken(payload: AuthPayload): string {
   return jwt.sign(payload, env.JWT_SECRET, { expiresIn: "15m" });
 }
 
-function signRefreshToken(userId: string): string {
-  return jwt.sign({ userId }, env.JWT_REFRESH_SECRET, { expiresIn: "30d" });
-}
-
-function signTokenPair(payload: AuthPayload) {
-  return {
-    token: signAccessToken(payload),
-    refreshToken: signRefreshToken(payload.userId),
-  };
+/**
+ * CHANGED IN P2-5: refresh tokens are no longer JWTs.
+ *
+ * A JWT is self-validating — anyone holding one can prove it is genuine
+ * without asking us. That is exactly wrong for a refresh token, because the
+ * whole point is that the SERVER decides whether it is still good. A refresh
+ * token is now opaque random bytes recorded in the Session table, so logging
+ * out and revoking actually mean something (see lib/sessions.ts).
+ *
+ * JWT_REFRESH_SECRET is therefore no longer used to sign anything. It stays in
+ * the config, still validated at boot, because rotating it is the emergency
+ * lever if the session table itself is ever compromised.
+ */
+async function issueTokenPair(
+  payload: AuthPayload,
+  ctx: SessionContext = {}
+) {
+  const { refreshToken, sessionId } = await createSession(
+    payload.userId,
+    payload.companyId,
+    ctx
+  );
+  return { token: signAccessToken(payload), refreshToken, sessionId };
 }
 
 /** What we send back — note: NEVER the passwordHash. */
@@ -88,7 +112,7 @@ function publicCompany(company: {
  * We wrap them in a transaction: either all three succeed, or
  * none happen. No half-created companies, ever.
  */
-export async function register(input: RegisterInput) {
+export async function register(input: RegisterInput, ctx: SessionContext = {}) {
   const existing = await prisma.user.findFirst({
     where: { email: input.email },
   });
@@ -126,11 +150,14 @@ export async function register(input: RegisterInput) {
     return { company, user };
   });
 
-  const tokens = signTokenPair({
-    userId: result.user.id,
-    companyId: result.company.id,
-    role: "ADMIN",
-  });
+  const tokens = await issueTokenPair(
+    {
+      userId: result.user.id,
+      companyId: result.company.id,
+      role: "ADMIN",
+    },
+    ctx
+  );
 
   return {
     ...tokens,
@@ -139,7 +166,7 @@ export async function register(input: RegisterInput) {
   };
 }
 
-export async function login(input: LoginInput) {
+export async function login(input: LoginInput, ctx: SessionContext = {}) {
   const user = await prisma.user.findFirst({
     where: { email: input.email, isActive: true },
     include: { company: true },
@@ -152,13 +179,45 @@ export async function login(input: LoginInput) {
   // ONE vague message for both "no such user" and "wrong password".
   // If we said which one it was, attackers could fish for valid emails.
   if (!user || !passwordOk) {
+    // Recorded even though the request fails — a burst of these is what an
+    // attack looks like from the inside, and it is the single most useful
+    // thing in the whole log. `companyId` may be unknown when the email
+    // matches nobody, so we only log when we can attribute it to a tenant.
+    if (user) {
+      await recordSecurityEvent({
+        companyId: user.companyId,
+        userId: user.id,
+        actorEmail: input.email,
+        action: "login.failed",
+        entity: "user",
+        entityId: user.id,
+        summary: `Failed sign-in for ${input.email}`,
+        ipAddress: ctx.ipAddress,
+        userAgent: ctx.userAgent,
+      });
+    }
     throw new AppError(401, "Invalid email or password");
   }
 
-  const tokens = signTokenPair({
-    userId: user.id,
+  const tokens = await issueTokenPair(
+    {
+      userId: user.id,
+      companyId: user.companyId,
+      role: user.role,
+    },
+    ctx
+  );
+
+  await recordSecurityEvent({
     companyId: user.companyId,
-    role: user.role,
+    userId: user.id,
+    actorEmail: user.email,
+    action: "login",
+    entity: "user",
+    entityId: user.id,
+    summary: `${user.name} signed in`,
+    ipAddress: ctx.ipAddress,
+    userAgent: ctx.userAgent,
   });
 
   return {
@@ -169,25 +228,36 @@ export async function login(input: LoginInput) {
 }
 
 /**
- * The renewal counter: verify the renewal card, check the person
- * still works here (not deactivated!), print a fresh day pass.
- * Re-reading the user from the DB matters — their role may have
- * changed since the card was issued.
+ * The renewal counter — rewritten in P2-5.
+ *
+ * It used to verify a JWT signature and hand back a fresh access token. The
+ * signature was the ONLY check, which meant the server had no say in whether
+ * the session was still supposed to exist. Now the token is looked up, and:
+ *
+ *   • an unknown, expired or revoked token is refused
+ *   • presenting an already-rotated token revokes the whole family (theft)
+ *   • a successful refresh RETIRES the token used and returns a new one
+ *
+ * The user is still re-read from the database, as before — their role may have
+ * changed since the session began, and an access token must never carry a
+ * privilege the person no longer holds.
  */
-export async function refresh(refreshToken: string) {
-  let payload: { userId: string };
+export async function refresh(refreshToken: string, ctx: SessionContext = {}) {
+  let rotated;
   try {
-    payload = jwt.verify(refreshToken, env.JWT_REFRESH_SECRET) as {
-      userId: string;
-    };
-  } catch {
-    throw new AppError(401, "Session expired — please log in again");
+    rotated = await rotateSession(refreshToken, ctx);
+  } catch (err) {
+    if (err instanceof SessionError) throw new AppError(401, err.message);
+    throw err;
   }
 
   const user = await prisma.user.findUnique({
-    where: { id: payload.userId },
+    where: { id: rotated.userId },
   });
   if (!user || !user.isActive) {
+    // Deactivated mid-session: end the session rather than leaving a valid
+    // token attached to an account that is no longer allowed in.
+    await revokeSession(rotated.refreshToken, "account-inactive");
     throw new AppError(401, "Account not found or deactivated");
   }
 
@@ -197,7 +267,107 @@ export async function refresh(refreshToken: string) {
       companyId: user.companyId,
       role: user.role,
     }),
+    // The client MUST store this — the token it sent is now dead.
+    refreshToken: rotated.refreshToken,
   };
+}
+
+/**
+ * Log out — for real this time (P2-5).
+ *
+ * Previously the client just deleted its copy of the token, which stopped
+ * exactly nobody: any other copy kept working for thirty days. Now the session
+ * is revoked server-side, so the token is dead everywhere at once.
+ *
+ * Returns quietly whether or not the token was found. Reporting "no such
+ * session" would let an attacker probe which tokens are live, and there is
+ * nothing useful a caller could do with the distinction anyway.
+ */
+export async function logout(refreshToken: string): Promise<void> {
+  await revokeSession(refreshToken, "logout");
+}
+
+/** Every device this user is currently signed in on. */
+export async function getSessions(userId: string, currentSessionId?: string) {
+  return listSessions(userId, currentSessionId);
+}
+
+/**
+ * Sign out every OTHER device, keeping the one making the request.
+ *
+ * Keeping the caller's own session is what makes this button usable — signing
+ * yourself out while pressing "sign out other devices" is a confusing result.
+ */
+export async function revokeOtherSessions(
+  userId: string,
+  keepRefreshToken?: string
+): Promise<number> {
+  let keepId: string | undefined;
+  if (keepRefreshToken) {
+    const { hashToken } = await import("../../lib/sessions.js");
+    const current = await prisma.session.findUnique({
+      where: { tokenHash: hashToken(keepRefreshToken) },
+      select: { id: true },
+    });
+    keepId = current?.id;
+  }
+  return revokeAllForUser(userId, "revoked", keepId);
+}
+
+/**
+ * Change a password, and sign out everywhere else (P2-5).
+ *
+ * The other-session revocation is the point, not a side effect. People change
+ * a password because they think somebody else has access — leaving that
+ * somebody's session alive defeats the entire exercise, and worse, leaves the
+ * user believing they have fixed it.
+ */
+export async function changePassword(
+  userId: string,
+  currentPassword: string,
+  newPassword: string,
+  keepRefreshToken?: string
+): Promise<{ revokedSessions: number }> {
+  const user = await prisma.user.findUnique({ where: { id: userId } });
+  if (!user) throw new AppError(404, "User not found");
+
+  const ok = await bcrypt.compare(currentPassword, user.passwordHash);
+  if (!ok) throw new AppError(401, "Current password is incorrect");
+
+  await prisma.user.update({
+    where: { id: userId },
+    data: { passwordHash: await bcrypt.hash(newPassword, 10) },
+  });
+
+  let keepId: string | undefined;
+  if (keepRefreshToken) {
+    const { hashToken } = await import("../../lib/sessions.js");
+    const current = await prisma.session.findUnique({
+      where: { tokenHash: hashToken(keepRefreshToken) },
+      select: { id: true },
+    });
+    keepId = current?.id;
+  }
+
+  const revokedSessions = await revokeAllForUser(
+    userId,
+    "password-change",
+    keepId
+  );
+
+  // No before/after — there is nothing here that can safely be written down.
+  // The FACT and the TIME are what matter.
+  await recordSecurityEvent({
+    companyId: user.companyId,
+    userId: user.id,
+    actorEmail: user.email,
+    action: "password.change",
+    entity: "user",
+    entityId: user.id,
+    summary: `Password changed; ${revokedSessions} other session(s) ended`,
+  });
+
+  return { revokedSessions };
 }
 
 /** Look up fresh info about the badge holder (for GET /me). */

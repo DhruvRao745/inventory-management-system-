@@ -8,6 +8,7 @@
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error.js";
+import { recordChange } from "../../lib/audit.js";
 import type {
   CreateProductInput,
   UpdateProductInput,
@@ -163,9 +164,13 @@ export async function createProduct(
 export async function updateProduct(
   companyId: string,
   id: string,
-  input: UpdateProductInput
+  input: UpdateProductInput,
+  userId?: string
 ) {
-  await getProduct(companyId, id); // proves it exists AND is ours
+  // Keep the BEFORE state — this is what makes "who changed the price from
+  // ₹50 to ₹500, and when?" answerable. The row itself only shows ₹500, and
+  // no amount of inference can recover what it used to be.
+  const existing = await getProduct(companyId, id); // proves it exists AND is ours
 
   if (input.sku) {
     const duplicate = await prisma.product.findFirst({
@@ -208,13 +213,30 @@ export async function updateProduct(
     if (dup) throw new AppError(409, `Barcode "${barcode}" is already in use`);
   }
 
-  return prisma.product.update({
-    where: { id },
-    data: { ...input, categoryId, preferredSupplierId, barcode },
-    include: {
-      category: { select: { id: true, name: true } },
-      preferredSupplier: { select: { id: true, name: true } },
-    },
+  return prisma.$transaction(async (tx) => {
+    const updated = await tx.product.update({
+      where: { id },
+      data: { ...input, categoryId, preferredSupplierId, barcode },
+      include: {
+        category: { select: { id: true, name: true } },
+        preferredSupplier: { select: { id: true, name: true } },
+      },
+    });
+
+    // Same transaction as the update, so the log can never disagree with the
+    // data — see the note at the top of lib/audit.ts.
+    await recordChange(tx, {
+      companyId,
+      userId: userId ?? null,
+      action: "product.update",
+      entity: "product",
+      entityId: id,
+      summary: `${updated.name} (${updated.sku}) updated`,
+      before: existing as unknown as Record<string, unknown>,
+      after: updated as unknown as Record<string, unknown>,
+    });
+
+    return updated;
   });
 }
 

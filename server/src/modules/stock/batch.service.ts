@@ -98,6 +98,11 @@ export async function planAllocation(
       productId,
       locationId,
       remainingQuantity: { gt: 0 },
+      // Only SELLABLE lots may fill an order (P2-2). Without this filter FEFO
+      // would cheerfully reach for a quarantined or damaged lot — and since
+      // FEFO picks the NEAREST EXPIRY first, damaged goods are exactly the
+      // ones it would grab soonest.
+      status: "AVAILABLE",
     },
     orderBy: orderFor(strategy),
   });
@@ -194,6 +199,8 @@ export async function receiveIntoBatch(
     unitCost?: Decimal | null;
     manufactureDate?: Date | null;
     expiryDate?: Date | null;
+    /** Condition this lot arrives in (P2-2). Defaults to AVAILABLE. */
+    status?: "AVAILABLE" | "DAMAGED" | "QUARANTINE" | "EXPIRED";
   }
 ): Promise<string> {
   const {
@@ -212,8 +219,14 @@ export async function receiveIntoBatch(
     throw new AppError(400, "Received quantity must be positive");
   }
 
+  // Status is part of a lot's identity (P2-2). "Batch B1, available" and
+  // "batch B1, quarantined" are two different holdings of the same lot number
+  // — merging them into one row would let quarantined units be sold under the
+  // cover of the good ones sharing their batch number.
+  const status = params.status ?? "AVAILABLE";
+
   const existing = await tx.inventoryBatch.findFirst({
-    where: { companyId, productId, locationId, batchNumber },
+    where: { companyId, productId, locationId, batchNumber, status },
   });
 
   let batchId: string;
@@ -244,6 +257,7 @@ export async function receiveIntoBatch(
         unitCost: unitCost ?? new D(0),
         receivedQuantity: quantity,
         remainingQuantity: quantity,
+        status,
       },
     });
     batchId = created.id;

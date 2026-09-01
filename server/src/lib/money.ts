@@ -49,6 +49,56 @@ export function grandTotalDecimal(
   return taxable.plus(tax).toDecimalPlaces(2);
 }
 
+/**
+ * The total of an invoice, whichever tax regime it was raised under (P2-3).
+ *
+ * THE RULE THIS ENFORCES: an issued invoice's total is READ, never recomputed.
+ *
+ * A GST invoice has its tax stamped on its lines at issue time. This function
+ * ADDS UP those stored amounts; it does not re-derive them from today's rates.
+ * That distinction is the whole point — if a rate changes next April, every
+ * invoice ever issued must keep the figures that were on the copy the customer
+ * received. Recomputing would silently rewrite financial history, and the two
+ * copies of the same document would stop agreeing.
+ *
+ * Legacy FLAT invoices have no per-line tax, so they fall back to the old
+ * whole-invoice calculation on their own stored `taxRate`. `taxMode` decides
+ * which path applies, so "no GST columns" and "GST of zero" are never confused
+ * — a nil-rated GST invoice is a real thing and must not look like a legacy one.
+ */
+export function invoiceTotalDecimal(inv: {
+  taxMode?: string | null;
+  taxRate: Decimal | null;
+  discount: Decimal | null;
+  lines: {
+    quantity: Decimal;
+    unitPrice: Decimal;
+    cgstAmount?: Decimal | null;
+    sgstAmount?: Decimal | null;
+    igstAmount?: Decimal | null;
+    taxableValue?: Decimal | null;
+  }[];
+}): Decimal {
+  if (inv.taxMode !== "GST") {
+    return grandTotalDecimal(lineSubtotal(inv.lines), inv.taxRate, inv.discount);
+  }
+
+  // Sum what was stamped. `taxableValue` already has the discount applied per
+  // line, so the discount must NOT be subtracted again here.
+  const zero = new D(0);
+  return inv.lines
+    .reduce(
+      (sum, l) =>
+        sum
+          .plus(l.taxableValue ?? zero)
+          .plus(l.cgstAmount ?? zero)
+          .plus(l.sgstAmount ?? zero)
+          .plus(l.igstAmount ?? zero),
+      zero
+    )
+    .toDecimalPlaces(2);
+}
+
 /** Sum of an invoice's lines, before discount and tax. */
 export function lineSubtotal(
   lines: { quantity: Decimal; unitPrice: Decimal }[]

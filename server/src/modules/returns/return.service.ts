@@ -290,10 +290,31 @@ export async function approveReturn(
 /**
  * The goods have physically arrived — THIS is where stock moves.
  *
- * Only lines marked `restock` produce a RETURN_IN movement. Damaged and
- * quarantined goods are recorded but stay out of the ledger, because they are
- * not available to sell.
+ * CHANGED IN P2-2. Every received line now enters the ledger; what changes
+ * between them is the CONDITION they enter in.
+ *
+ * Before statuses existed, damaged returns were recorded on the return
+ * document and then vanished — not counted, not valued, invisible to a
+ * stocktake. The warehouse held goods the system denied existed, and the first
+ * person to find out was whoever did the count and got an unexplainable
+ * variance.
+ *
+ * Now the goods land in a bucket that says what they are:
+ *
+ *   SELLABLE + restock    → AVAILABLE   (back on sale)
+ *   SELLABLE, no restock  → QUARANTINE  (came back, held pending a decision)
+ *   DAMAGED               → DAMAGED     (owned, never sellable)
+ *   QUARANTINE            → QUARANTINE  (awaiting inspection)
+ *
+ * Only AVAILABLE stock can be sold, so the business rule PRD §9 cares about —
+ * damaged goods must never re-enter sellable stock — still holds exactly. The
+ * difference is that the company can now see what it owns.
  */
+const RETURN_STATUS: Record<string, "AVAILABLE" | "DAMAGED" | "QUARANTINE"> = {
+  SELLABLE: "AVAILABLE",
+  DAMAGED: "DAMAGED",
+  QUARANTINE: "QUARANTINE",
+};
 export async function receiveReturn(
   companyId: string,
   userId: string,
@@ -317,14 +338,16 @@ export async function receiveReturn(
       );
     }
 
-    const restockLines = ret.lines.filter((l) => l.restock);
+    // Every line comes back into the ledger now (P2-2) — the condition
+    // decides which bucket, not whether it exists at all.
+    const incomingLines = ret.lines;
 
-    if (restockLines.length > 0) {
+    if (incomingLines.length > 0) {
       // Stock locks first, then cost locks — the ordering rule from P1-3.
       await lockStock(
         tx,
         companyId,
-        restockLines.map((l) => ({
+        incomingLines.map((l) => ({
           productId: l.productId,
           locationId: ret.invoice.locationId,
         }))
@@ -332,14 +355,22 @@ export async function receiveReturn(
       await lockCost(
         tx,
         companyId,
-        restockLines.map((l) => l.productId)
+        incomingLines.map((l) => l.productId)
       );
     }
 
     const ref = retRef(ret.number);
     const invRef = `INV-${String(ret.invoice.number).padStart(4, "0")}`;
 
-    for (const line of restockLines) {
+    for (const line of incomingLines) {
+      // SELLABLE goods the operator chose NOT to restock are held rather than
+      // resold — they physically came back, so pretending otherwise would be
+      // the same invisibility problem in a different costume.
+      const status =
+        line.condition === "SELLABLE" && !line.restock
+          ? "QUARANTINE"
+          : RETURN_STATUS[line.condition] ?? "QUARANTINE";
+
       // Find the original sale so the goods come back at the cost they left
       // at — same principle as cancelInvoice. Valuing a return at a newer,
       // higher average would conjure profit out of a customer's change of mind.
@@ -369,16 +400,25 @@ export async function receiveReturn(
           locationId: ret.invoice.locationId,
           type: "RETURN_IN",
           quantity: line.quantity,
+          status,
           costAtTime,
           reference: ref,
-          note: `Returned on ${ref} against ${invRef}`,
+          note:
+            status === "AVAILABLE"
+              ? `Returned on ${ref} against ${invRef}`
+              : `Returned ${status.toLowerCase()} on ${ref} against ${invRef}`,
           createdById: userId,
         },
       });
 
       // Batch-tracked goods go back to the lots they came from, so a return
       // can't launder September-expiry stock into December-expiry stock.
-      if (originalSale) {
+      //
+      // ONLY for stock returning to AVAILABLE. A damaged unit must not be put
+      // back into its original sellable lot — that lot is good stock, and
+      // topping it up with a broken unit would make the damage sellable again
+      // through the back door, which is the exact thing statuses exist to stop.
+      if (originalSale && status === "AVAILABLE") {
         await restoreAllocationsOf(tx, originalSale.id, movement.id);
       }
     }

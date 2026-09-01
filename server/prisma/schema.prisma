@@ -32,6 +32,13 @@ model Company {
   email     String?
   gstin        String? // GST registration number (India)
   pan          String? // PAN — the business tax ID
+  /// The seller's state, as a GST state code ("27" Maharashtra, "29" Karnataka).
+  ///
+  /// This is what decides CGST+SGST vs IGST on every invoice: GST splits by
+  /// WHERE THE CUSTOMER IS relative to the seller, not by what is being sold.
+  /// Without it the system cannot tell an intra-state sale from an inter-state
+  /// one, and no amount of rate configuration will fix that.
+  stateCode    String?
   sealText     String? // one line inside the round stamp, e.g. "For Demo Traders"
   invoiceTerms String? // terms & conditions printed on invoices (one per line)
   createdAt DateTime @default(now())
@@ -53,6 +60,9 @@ model Company {
   supplierReturns SupplierReturn[]
   productLocationSettings ProductLocationSetting[]
   stockCounts    StockCount[]
+  stockReservations StockReservation[]
+  sessions          Session[]
+  auditLogs         AuditLog[]
 }
 
 // ------------------------------------------------------------
@@ -88,11 +98,161 @@ model User {
   supplierReturns       SupplierReturn[]
   stockCountsStarted    StockCount[] @relation("CountStartedBy")
   stockCountsCompleted  StockCount[] @relation("CountCompletedBy")
+  stockReservations     StockReservation[]
+  sessions              Session[]
+  auditLogs             AuditLog[]
 
   // Same email may exist at two different companies,
   // but only once within one company:
   @@unique([companyId, email])
   @@index([companyId])
+}
+
+// ------------------------------------------------------------
+// AUDIT LOG (P2-6)
+// ------------------------------------------------------------
+
+/// One recorded action: who did what, to which thing, when.
+///
+/// WHY A TABLE, WHEN /api/audit ALREADY WORKS
+///
+/// The existing activity feed INFERS history from tables that happen to have
+/// timestamps — products, POs, movements. That is genuinely useful and it works
+/// retroactively, so it is kept. But inference can only see what still exists,
+/// and only in its current state. It cannot answer:
+///
+///   • who signed in, from where, and who failed to
+///   • that a price went from ₹50 to ₹500 last Tuesday, and who moved it
+///   • that a supplier was deactivated, by whom
+///   • that someone was promoted from STAFF to ADMIN
+///
+/// Those are exactly the events an audit exists for, and none of them leave a
+/// trace in the row's final state. So this table records them as they happen.
+///
+/// WHAT IS DELIBERATELY NOT LOGGED HERE
+///
+/// Stock movements. The ledger is already append-only and never edited — it IS
+/// an audit trail, and a better one than this could be. Logging every movement
+/// again would double writes on the hottest path in the system and bury the
+/// dozen entries that matter under thousands that were already recorded.
+///
+/// WHY `before` AND `after` ARE JSON
+///
+/// The alternative — a column per field — cannot describe a schema that keeps
+/// changing, and every new field would need a migration to become auditable.
+/// JSON costs queryability, which is the right trade: this is read by humans
+/// investigating one incident, not aggregated across millions of rows.
+model AuditLog {
+  id        String   @id @default(cuid())
+  companyId String
+
+  /// Nullable ON PURPOSE. A FAILED LOGIN has no authenticated user — and a
+  /// failed login is one of the most important things here, because a burst of
+  /// them is what an attack looks like from the inside.
+  userId    String?
+  /// The email attempted, kept even when userId is null. Without it a failed
+  /// login records that *somebody* failed, which is useless.
+  actorEmail String?
+
+  /// What happened: "login", "login.failed", "product.update",
+  /// "payment.record", "invoice.cancel", "user.role_change", "stock.reclassify".
+  action    String
+  /// Which kind of thing: "user", "product", "invoice", "payment"...
+  entity    String
+  entityId  String?
+  /// Human-readable summary, so a reader doesn't have to parse JSON to grasp
+  /// what happened.
+  summary   String?
+
+  /// Field values before and after, where a change makes that meaningful.
+  before    Json?
+  after     Json?
+
+  ipAddress String?
+  userAgent String?
+  createdAt DateTime @default(now())
+
+  company Company @relation(fields: [companyId], references: [id])
+  user    User?   @relation(fields: [userId], references: [id])
+
+  // The three ways this is actually read: recent activity, one entity's
+  // history, one person's actions.
+  @@index([companyId, createdAt])
+  @@index([companyId, entity, entityId])
+  @@index([companyId, userId, createdAt])
+  @@index([companyId, action, createdAt])
+}
+
+// ------------------------------------------------------------
+// SESSIONS (P2-5)
+// ------------------------------------------------------------
+
+/// One signed-in device.
+///
+/// WHY THIS TABLE EXISTS
+///
+/// Before it, a refresh token was a signed JWT and nothing more. The server
+/// checked the signature and the expiry — it had no record that the token
+/// existed, so it had no way to say "not any more".
+///
+/// Three consequences, all bad:
+///   • Logout was a client-side illusion. It cleared localStorage; a copy of
+///     the token taken beforehand kept working for the full 30 days.
+///   • A stolen token could not be revoked. Not by logging out, not by
+///     changing password. The only remedy was rotating JWT_REFRESH_SECRET,
+///     which signs out every user on every device.
+///   • Nobody could see where they were signed in.
+///
+/// WHY ONLY A HASH IS STORED
+///
+/// PRD §15: "Store only secure token representations where appropriate."
+/// `tokenHash` is SHA-256 of the refresh token; the token itself is never
+/// written down. If this table leaks, the hashes are useless to an attacker.
+/// Storing raw tokens would make a database dump a set of 30-day master keys
+/// to every account in the system — the same reasoning as passwordHash.
+///
+/// SHA-256 rather than bcrypt on purpose: a refresh token is 256 bits of
+/// server-generated randomness, not a human-chosen password. There is nothing
+/// to brute-force, so the slow hashing bcrypt exists for buys nothing — and
+/// this is verified on every token refresh, where speed matters.
+model Session {
+  id        String   @id @default(cuid())
+  userId    String
+  companyId String
+
+  /// SHA-256 of the refresh token. Unique so a replay can be spotted.
+  tokenHash String   @unique
+
+  /// Sessions born of one login share a family id (P2-5).
+  ///
+  /// Rotation issues a new token on every refresh and retires the old one.
+  /// If a RETIRED token is ever presented again, only two things can explain
+  /// it: the token was stolen and replayed, or a legitimate client lost the
+  /// response and retried. Neither is safe to wave through, so the whole
+  /// family is revoked and everyone re-authenticates.
+  familyId  String
+
+  /// Free-text device description from the User-Agent. For the user's benefit
+  /// only — trivially spoofed, so it is never used for any security decision.
+  userAgent String?
+  ipAddress String?
+
+  createdAt   DateTime  @default(now())
+  lastUsedAt  DateTime  @default(now())
+  expiresAt   DateTime
+  /// Set when this token is rotated away, revoked, or logged out.
+  revokedAt   DateTime?
+  /// Why it ended — "logout", "rotated", "revoked", "reuse-detected",
+  /// "password-change". Kept because "my session ended and I don't know why"
+  /// is otherwise unanswerable.
+  revokedReason String?
+
+  user    User    @relation(fields: [userId], references: [id], onDelete: Cascade)
+  company Company @relation(fields: [companyId], references: [id])
+
+  @@index([userId, revokedAt])
+  @@index([familyId])
+  @@index([expiresAt])
 }
 
 // ------------------------------------------------------------
@@ -118,6 +278,7 @@ model Location {
   supplierReturns SupplierReturn[]
   productSettings ProductLocationSetting[]
   stockCounts    StockCount[]
+  stockReservations StockReservation[]
 
   @@unique([companyId, name])
   @@index([companyId])
@@ -332,6 +493,22 @@ model SupplierReturnLine {
 // INVOICES (selling stock — Phase F4)
 // ------------------------------------------------------------
 
+/// Which tax regime an invoice was raised under (P2-3). See Invoice.taxMode.
+enum TaxMode {
+  FLAT // legacy: one taxRate for the whole invoice
+  GST  // per-line CGST/SGST/IGST
+}
+
+/// Intra-state (CGST+SGST) or inter-state (IGST).
+///
+/// Decided by comparing the seller's state with the place of supply. Same
+/// goods and same rate produce a different SPLIT depending on this — and the
+/// split matters because the halves go to different governments.
+enum SupplyType {
+  INTRA_STATE // buyer in the seller's state → CGST + SGST
+  INTER_STATE // buyer elsewhere            → IGST
+}
+
 enum InvoiceStatus {
   DRAFT     // being built; editable
   ISSUED    // finalised; stock deducted via SALE movements
@@ -354,6 +531,26 @@ model Invoice {
   notes           String?
   taxRate         Decimal? @db.Decimal(5, 2) // % applied after discount (A3)
   discount        Decimal? @db.Decimal(12, 2) // flat amount off the subtotal (A3)
+
+  // --- GST (P2-3) --------------------------------------------------------
+  //
+  // `taxMode` is the load-bearing field. It records WHICH REGIME an invoice
+  // was raised under, so nothing ever has to infer it from whether other
+  // columns happen to be null:
+  //
+  //   FLAT — every invoice created before P2-3. One `taxRate` on the whole
+  //          invoice. Read from stored values, NEVER recomputed.
+  //   GST  — per-line CGST/SGST/IGST, computed at issue and stamped.
+  //
+  // Without this flag, "no GST columns" and "GST of zero" are the same thing
+  // on the wire, and a nil-rated invoice would be indistinguishable from a
+  // legacy one.
+  taxMode         TaxMode  @default(FLAT)
+  /// Buyer's state code at the time of invoicing — the place of supply.
+  /// Snapshotted, because a customer who later moves state must not
+  /// retroactively change the tax treatment of past sales.
+  placeOfSupply   String?
+  supplyType      SupplyType?
   locationId      String // where the sold stock comes from
   issuedAt        DateTime? // when it moved to ISSUED
   createdById     String
@@ -426,6 +623,10 @@ model Customer {
   email     String?
   phone     String?
   address   String?
+  /// Buyer's GST registration, for B2B invoices.
+  gstin     String?
+  /// Buyer's state code — the "place of supply" for goods (P2-3).
+  stateCode String?
   notes     String?
   isActive  Boolean  @default(true)
   createdAt DateTime @default(now())
@@ -445,6 +646,24 @@ model InvoiceLine {
   productId String
   quantity  Decimal @db.Decimal(18, 4)
   unitPrice Decimal @db.Decimal(12, 2)
+
+  // --- GST, stamped at write time (P2-3) --------------------------------
+  //
+  // Every one of these is a SNAPSHOT, for the same reason costAtTime is in
+  // P1-3: an issued invoice is a legal document. If the government raises the
+  // rate on tinned fish in April, an invoice from March must still show the
+  // March tax. Recomputing tax on read would silently rewrite financial
+  // history — and the customer's copy would stop matching ours.
+  //
+  // NULL on every invoice created before P2-3. Those are read from the
+  // invoice's flat `taxRate` instead; `Invoice.taxMode` says which regime
+  // applies, so nothing ever has to guess.
+  hsnCode      String?  // HSN/SAC code as it stood when invoiced
+  gstRate      Decimal? @db.Decimal(5, 2)  // total GST % for this line
+  taxableValue Decimal? @db.Decimal(12, 2) // line value tax is charged on
+  cgstAmount   Decimal? @db.Decimal(12, 2) // central — intra-state only
+  sgstAmount   Decimal? @db.Decimal(12, 2) // state — intra-state only
+  igstAmount   Decimal? @db.Decimal(12, 2) // integrated — inter-state only
 
   invoice Invoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
   product Product @relation(fields: [productId], references: [id])
@@ -590,6 +809,13 @@ model Product {
   ///   New Average = Total Inventory Value / Total Inventory Quantity
   /// Six decimal places, not two: ₹100 across 3 units is 33.333333, and
   /// rounding to paise on every receipt compounds into real drift.
+  /// GST rate for this product, as a percentage (5, 12, 18, 28...).
+  ///
+  /// Lives on the product because rate follows the GOODS, not the invoice —
+  /// a shop selling both books (nil-rated) and electronics (28%) cannot be
+  /// described by one invoice-level rate. Copied onto each invoice line at
+  /// write time, so changing it here never alters an invoice already issued.
+  gstRate           Decimal? @db.Decimal(5, 2)
   avgCost           Decimal  @default(0) @db.Decimal(18, 6)
   /// Total value of stock on hand for this product, company-wide.
   /// Maintained alongside avgCost so the average never has to be recomputed
@@ -619,6 +845,7 @@ model Product {
   goodsReceiptLines  GoodsReceiptLine[]
   supplierReturnLines SupplierReturnLine[]
   locationSettings   ProductLocationSetting[]
+  stockReservations  StockReservation[]
 
   // SKU must be unique within a company (two companies can both have "SKU-001")
   @@unique([companyId, sku])
@@ -662,6 +889,13 @@ model InventoryBatch {
   unitCost          Decimal   @default(0) @db.Decimal(12, 2) // cost of THIS lot
   receivedQuantity  Decimal   @db.Decimal(18, 4) // as first received; never changes
   remainingQuantity Decimal   @db.Decimal(18, 4) // what's left right now
+  /// Condition of THIS lot (P2-2), mirroring the movement that created it.
+  ///
+  /// A batch needs its own copy because FEFO reads batches, not movements: an
+  /// allocator that only knew movement statuses would happily pick a
+  /// quarantined lot to fill an order, since the lot looks like ordinary stock
+  /// from the batch table's point of view.
+  status            StockStatus @default(AVAILABLE)
   createdAt         DateTime  @default(now())
   updatedAt         DateTime  @updatedAt
 
@@ -671,9 +905,12 @@ model InventoryBatch {
   allocations StockMovementBatch[]
   countItems  StockCountItem[]
 
-  // One batch number means one lot, per product per location per company.
-  @@unique([companyId, productId, locationId, batchNumber])
-  // The FEFO scan: "oldest-expiring stock of this product here, please."
+  // One batch number means one lot, per product per location per company —
+  // and per CONDITION since P2-2, because "B1, available" and "B1, damaged"
+  // are separate holdings that must never be merged into one row.
+  @@unique([companyId, productId, locationId, batchNumber, status])
+  // The FEFO scan: "oldest-expiring SELLABLE stock of this product here."
+  @@index([companyId, productId, locationId, status, expiryDate])
   @@index([companyId, productId, locationId, expiryDate])
   @@index([companyId])
 }
@@ -824,6 +1061,71 @@ model ProductLocationSetting {
 }
 
 // ------------------------------------------------------------
+// RESERVATIONS (P2-1)
+// ------------------------------------------------------------
+
+/// Why a reservation is NOT a StockMovement.
+///
+/// PRD §13: "A future reservation must not immediately subtract physical
+/// stock." A reservation is a PROMISE, not an event. The goods are still on
+/// the shelf; someone has simply spoken for them.
+///
+/// Putting a promise in the ledger would corrupt everything downstream: stock
+/// on hand would drop for goods nobody has taken, valuation would fall for
+/// stock the company still owns, and a stocktake would report a variance
+/// against goods physically present. So reservations live in their own table
+/// and the ledger stays a record of things that actually happened.
+///
+///     On hand   = SUM(movements)              — what is physically here
+///     Reserved  = SUM(active reservations)    — what is spoken for
+///     Available = On hand − Reserved          — what may still be sold
+enum ReservationStatus {
+  ACTIVE    // holding stock right now
+  CONSUMED  // became a real movement (the invoice was issued)
+  RELEASED  // cancelled or expired — no longer holds anything
+}
+
+/// One promise: N units of a product at a location, held for something.
+model StockReservation {
+  id         String            @id @default(cuid())
+  companyId  String
+  productId  String
+  locationId String
+  /// Always POSITIVE. A reservation reduces availability by its own size;
+  /// making it signed would invite a "negative reservation" that silently
+  /// creates availability out of nothing.
+  quantity   Decimal           @db.Decimal(18, 4)
+  status     ReservationStatus @default(ACTIVE)
+
+  /// What is holding the stock. Kept as a loose (type, id) pair rather than a
+  /// foreign key per source, so a future quote or transfer can reserve without
+  /// another migration. `invoice` is the only source today.
+  sourceType String
+  sourceId   String
+
+  /// Optional expiry for ad-hoc holds. A reservation with no expiry is held
+  /// until something explicitly consumes or releases it.
+  expiresAt  DateTime?
+  note       String?
+
+  createdById String
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  releasedAt  DateTime?
+  consumedAt  DateTime?
+
+  company   Company  @relation(fields: [companyId], references: [id])
+  product   Product  @relation(fields: [productId], references: [id])
+  location  Location @relation(fields: [locationId], references: [id])
+  createdBy User     @relation(fields: [createdById], references: [id])
+
+  // Availability is read on EVERY stock write, so this index is load-bearing.
+  @@index([companyId, productId, locationId, status])
+  @@index([companyId, sourceType, sourceId])
+  @@index([companyId, status])
+}
+
+// ------------------------------------------------------------
 // THE HEART: STOCK AS AN EVENT LOG
 // ------------------------------------------------------------
 
@@ -835,6 +1137,28 @@ enum MovementType {
   ADJUSTMENT   // count correction, damage, theft   (+/-)
   TRANSFER_IN  // arrived from another location     (+)
   TRANSFER_OUT // sent to another location          (-)
+}
+
+/// What CONDITION a quantity of stock is in (P2-2, PRD §13).
+///
+/// The distinction that matters: stock can be OWNED without being SELLABLE.
+/// A crushed box in the corner is still the company's property — it belongs in
+/// the valuation and it must show up in a stocktake — but no order should ever
+/// be filled from it.
+///
+///     On hand   = SUM(all movements)                    — what we own
+///     Sellable  = SUM(movements WHERE status=AVAILABLE)  — what we may sell
+///     Available = Sellable − Reserved                    — what's still free
+///
+/// Before this existed, damaged returns simply never entered stock. They were
+/// noted on the return document and then vanished: not counted, not valued,
+/// invisible to a stocktake — which meant the warehouse held goods the system
+/// denied existed.
+enum StockStatus {
+  AVAILABLE  // good stock, sellable
+  DAMAGED    // owned, not sellable — broken, crushed, spoiled
+  QUARANTINE // held pending inspection; may become AVAILABLE or DAMAGED
+  EXPIRED    // past its expiry date and written off
 }
 
 /// We NEVER store "current stock = 50" anywhere.
@@ -852,6 +1176,16 @@ model StockMovement {
   /// Decimal(18,4) since P1-2 — see Product.precision for how many of those
   /// four places a given product is actually allowed to use.
   quantity    Decimal      @db.Decimal(18, 4)
+  /// The condition this quantity is in (P2-2). Defaults to AVAILABLE, which
+  /// is also what every pre-P2-2 row means — everything already in the ledger
+  /// when this column arrived was ordinary sellable stock.
+  ///
+  /// Stock does NOT change status by having this column rewritten: movements
+  /// are immutable (see the note on this model). Reclassifying goods writes a
+  /// PAIR of ADJUSTMENT rows — one negative in the old status, one positive in
+  /// the new — so the reclassification is itself a dated, attributed event and
+  /// the history of "these units were quarantined for a week" survives.
+  status      StockStatus  @default(AVAILABLE)
   unitCost    Decimal?     @db.Decimal(12, 2) // what we PAID, on incoming stock
   /// The weighted-average unit cost applied to THIS movement (P1-3).
   ///
@@ -882,4 +1216,6 @@ model StockMovement {
   // The queries we'll run constantly — make them fast:
   @@index([companyId, productId, locationId])
   @@index([companyId, createdAt])
+  // Sellable stock is now a filtered sum, run on every outgoing movement.
+  @@index([companyId, productId, locationId, status])
 }

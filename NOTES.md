@@ -1287,3 +1287,209 @@ Client `tsc --noEmit` clean; production build clean (80 modules). The **server
 suite was not re-run here** — Prisma's engine binaries can't be downloaded in
 the sandbox (403), so tests must be run locally. Changes are client-only, so
 the expected result is an unchanged 181 passing.
+
+---
+
+# 🏁 P2 COMPLETE — all six features
+
+**319 tests, 19 files, 37 migrations.** Built in PRD §27 order.
+
+| # | Feature | API | UI | Tests |
+|---|---|---|---|---|
+| 1 | Reservations | ✅ | — | 21 |
+| 2 | Inventory statuses | ✅ | — | 18 |
+| 3 | GST structure | ✅ | — | 34 |
+| 4 | Reporting + dashboard | ✅ | — | 19 |
+| 5 | Session management | ✅ | partial | 26 |
+| 6 | Audit history | ✅ | — | 20 |
+
+UI is owed for all six — the P2 work was deliberately API-first, since every
+one of these changes a rule the UI would otherwise have to guess at.
+
+---
+
+## P2-1 — Reservations
+
+**The formula:** `Available = On hand − Reserved`, and a reservation writes
+NOTHING to the ledger. PRD §13: a future reservation must not subtract physical
+stock. Put a promise in the ledger and stock on hand drops for goods nobody has
+taken, valuation falls for stock the company still owns, and a stocktake reports
+a variance against goods sitting in plain sight.
+
+**The decision that makes it work:** issuing an invoice checks availability
+*excluding its own hold*. A draft reserves its lines, so at issue time the stock
+it needs is already spoken for — by itself. Count that and every draft blocks
+its own issue: reserve 5, be told 5 are unavailable, forever.
+
+**Concurrency:** reserving takes the SAME advisory lock, on the SAME key, as
+ledger writes. Reserving is read-check-write — the exact race P0 fixed. A
+separate lock key would be a separate queue, which is the same as no lock.
+
+**Reversed mid-implementation:** drafts were originally refused when stock was
+short. Changed to reserve what's available and never block, because a draft is
+work in progress, not a promise — you must be able to write up an order before
+the delivery that fills it arrives. Issuing is the real gate.
+
+## P2-2 — Inventory statuses
+
+Stock can be OWNED without being SELLABLE.
+
+```
+On hand   = SUM(all movements)                   — what we own
+Sellable  = SUM(movements WHERE status=AVAILABLE) — what we may sell
+Available = Sellable − Reserved                   — what's still free
+```
+
+**Reclassifying is a PAIR of ADJUSTMENT movements**, never an in-place status
+edit. Editing would destroy the record that goods were ever quarantined — the
+ledger would claim they'd always been available, and no one could tell an
+inspection happened. This keeps the P0 append-only rule intact.
+
+**A bug caught during implementation:** I first forced every outgoing movement
+to `AVAILABLE`. That would have made quarantine a one-way door — the negative
+half of a reclassification must be allowed to name the bucket it drains. Sales
+stay forced, because letting a client tag a sale DAMAGED would drain a bucket
+nothing was put into.
+
+**Batches carry their own status.** FEFO reads batches, not movements, so an
+allocator knowing only movement statuses would pick a quarantined lot — and
+since FEFO takes nearest-expiry first, a short-dated quarantined lot is exactly
+the one it grabs. The batch unique key now includes status, so "B1 available"
+and "B1 damaged" can't merge into one row where bad units hide behind good.
+
+**Visible behaviour change:** damaged sales returns now enter the ledger. They
+used to be noted on the return document and vanish — not counted, not valued,
+invisible to a stocktake. The warehouse held goods the system denied existed.
+
+## P2-3 — GST
+
+GST is one tax collected by two governments. Intra-state it splits (CGST +
+SGST); inter-state the whole amount is IGST. Same total, different split — and
+the split decides which government gets the money.
+
+**Tax is STAMPED at write time, never recomputed.** Same principle as
+`costAtTime` in P1-3. Change a product's rate from 18% to 28% and every invoice
+already issued keeps its 18% — otherwise financial history rewrites itself and
+the customer's copy stops matching ours, with no way to tell which is right.
+
+**`taxMode` is load-bearing.** Without it, "legacy invoice, no GST columns" and
+"GST invoice at 0%" are identical on the wire — and a nil-rated invoice is a
+real thing.
+
+**Two fiddly bits:** the discount is apportioned across lines BEFORE tax (taxing
+full price then subtracting charges tax on money never paid), and CGST/SGST are
+derived by halving-then-subtracting so they always sum to the total — rounding
+both halves independently turns ₹0.03 into ₹0.04.
+
+**Not claimed:** reverse charge, composition scheme, e-way bills, e-invoicing,
+exports/SEZ, ITC matching, GSTR filing. Listed in `lib/gst.ts`'s header, because
+PRD §16 warns against claiming compliance.
+
+## P2-4 — Reporting + dashboard
+
+Five reports PRD §18 required that didn't exist: stock-by-status (with the value
+of stock that CAN'T be sold), stock-by-batch, expired (flagging stock still
+counted as good — meaning valuation is overstated right now), returns (a RATE,
+not a count — ten returns is excellent on 10,000 sales and alarming on 20), and
+gst-summary.
+
+**Every dashboard figure is derived, none stored.** PRD §19 forbids counters and
+the reason is worth keeping: a counter has to be missed ONCE — one early return,
+one retry that double-counts — and it's silently wrong forever, on the screen
+people stop checking once they trust it. The test writes a movement directly to
+the database, bypassing every service, and asserts the dashboard still sees it.
+
+**First tests in the suite to cross HTTP** (supertest added here). The
+double-`JSON.stringify` bug survived 181 green tests precisely because nothing
+did.
+
+## P2-5 — Sessions
+
+**Logout used to do nothing.** A refresh token was a signed JWT; the signature
+was the only check. The server kept no record it existed, so it couldn't later
+say "not any more". Logout cleared localStorage — any copy taken beforehand kept
+working for 30 days, and nothing a user or admin could do would stop it. The
+only remedy was rotating `JWT_REFRESH_SECRET`, signing out everyone everywhere.
+
+**Refresh tokens are no longer JWTs.** A JWT is self-validating — anyone holding
+one can prove it genuine without asking us, which is exactly wrong when the
+server needs the final say. Now opaque random bytes, stored as SHA-256.
+
+**SHA-256, not bcrypt.** bcrypt is slow to make guessing human-chosen passwords
+expensive. A refresh token is 256 bits of server randomness — nothing to guess,
+so the slowness buys nothing on a path that runs every 15 minutes.
+
+**Reuse detection by family.** Every refresh retires the token used, so one
+should be used exactly once. A retired token reappearing is either theft-replay
+or a client that lost its successor — indistinguishable from the server, so the
+whole lineage dies. Other devices survive, or this would be too disruptive to
+leave on.
+
+**Client change that is load-bearing:** `api.ts` must store the rotated token.
+Without it the next refresh presents a retired token, the server reads a replay,
+and the user is logged out for no reason they could understand.
+
+**Deliberate limit:** access tokens stay stateless and unchecked — a DB read per
+API call would make the database a single point of failure for every request. A
+revoked session therefore has a ≤15-minute tail.
+
+## P2-6 — Audit history
+
+The old feed INFERRED history from tables with timestamps. Kept, because it
+works retroactively — but inference only sees what still exists, in its current
+state. It shows a product at ₹500; it cannot say the price was ₹50 last Tuesday.
+
+The events an audit exists for leave no trace in the final row: logins, FAILED
+logins, permission changes, price edits, cancellations. A failed login changes
+nothing anywhere — which is why a burst of them, the clearest sign of an attack
+in progress, was completely invisible.
+
+**Audit writes go inside the caller's transaction.** The async alternative
+sounds safer and is worse: a log with gaps isn't weaker, it's unusable — a gap
+is indistinguishable from nothing having happened, so one missing entry poisons
+every conclusion including "this person did nothing wrong". And gaps wouldn't be
+random: writes fail under load and during incidents, exactly the periods anyone
+would later reconstruct.
+
+**Stock movements are NOT logged.** The ledger is already append-only — it IS an
+audit trail, and a better one. Duplicating it doubles writes on the hottest path
+and buries the entries that matter.
+
+**Two guarantees in the sanitiser:** `passwordHash` never reaches the table (the
+log is read widely during investigations — credentials would make it the softest
+target in the system), and Decimals are stored as strings, since JSON has no
+decimal type and a price becoming 49.99999999 undermines the one thing the trail
+is for.
+
+---
+
+# Bugs found by tests, not by reports
+
+Three, all during P2:
+
+1. **Double `JSON.stringify`** (P2 start) — `api()` already serialises the body;
+   three call sites stringified first, producing a quoted string that
+   `express.json()` rejects in strict mode. Raising a sales return, recording a
+   refund, and recording a payment were ALL dead in the browser while 181 tests
+   passed. Verified with a throwaway express harness: double-encoded → HTTP 400,
+   single → 200. **The lesson:** a green suite only covers the seams it crosses.
+   Nothing tested the client↔server boundary.
+
+2. **Forced AVAILABLE on outgoing movements** (P2-2) — my own change, caught
+   minutes later. Would have made quarantine impossible to release.
+
+3. **Blank SKU accepted by the service** (P2-6) — a test calling
+   `updateProduct` directly saved `sku: ""`. Not reachable via the API (Zod
+   blocks it at the route) but nothing in the database disagreed. Now constrained.
+
+---
+
+# Still open
+
+- **UI for all six P2 features.** API-first was deliberate; the screens are owed.
+- **`pretest` uses `prisma db push`**, so the **38 CHECK constraints** are never
+  exercised by the suite. They are live in production and invisible to tests.
+  Switching to `prisma migrate reset` would fix it.
+- **P3 not started:** accounting integration, purchase/sales automation,
+  forecasting, demand planning, mobile/POS, external integrations, advanced
+  analytics.

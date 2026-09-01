@@ -2,16 +2,19 @@
  * Stock routes — the diary counter.
  *
  *   POST /api/stock/movements  → write a diary line (any logged-in user)
+ *   POST /api/stock/reclassify → move stock between conditions (ADMIN/MANAGER)
  *   POST /api/stock/transfer   → move goods between locations
  *   GET  /api/stock/movements  → read the diary (history)
  *   GET  /api/stock/levels     → current totals + low-stock flags
  *
- * No PATCH. No DELETE. The diary is written in pen.
+ * No PATCH. No DELETE. The diary is written in pen — which is exactly why
+ * reclassifying stock POSTs two new lines rather than editing old ones.
  */
 import { Router } from "express";
 import {
   createMovementSchema,
   transferSchema,
+  reclassifySchema,
   listMovementsQuerySchema,
   levelsQuerySchema,
   batchQuerySchema,
@@ -19,7 +22,11 @@ import {
 import * as stockService from "./stock.service.js";
 import * as batchService from "./batch.service.js";
 import { asyncHandler } from "../../middleware/error.js";
-import { requireAuth, type AuthRequest } from "../../middleware/auth.js";
+import {
+  requireAuth,
+  requireRole,
+  type AuthRequest,
+} from "../../middleware/auth.js";
 
 export const stockRouter = Router();
 stockRouter.use(requireAuth);
@@ -34,6 +41,20 @@ stockRouter.post(
       input
     );
     res.status(201).json(movement);
+  })
+);
+
+stockRouter.post(
+  "/reclassify",
+  requireRole("ADMIN", "MANAGER"),
+  asyncHandler(async (req: AuthRequest, res) => {
+    const input = reclassifySchema.parse(req.body);
+    const result = await stockService.reclassifyStock(
+      req.user!.companyId,
+      req.user!.userId,
+      input
+    );
+    res.status(201).json(result);
   })
 );
 

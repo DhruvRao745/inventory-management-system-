@@ -12,6 +12,13 @@ const lineSchema = z.object({
   // Product.precision — Zod doesn't know which product this line is for.
   quantity: z.union([z.number().positive(), z.string().trim().min(1)]),
   unitPrice: z.number().nonnegative("Price can't be negative"),
+  /**
+   * Override the product's GST rate for this line (P2-3). Rare, but real —
+   * the same goods can carry a different rate in some circumstances, and
+   * forcing a product edit to invoice correctly would corrupt the master data
+   * for every future sale.
+   */
+  gstRate: z.number().min(0).max(100).optional(),
 });
 
 export const createInvoiceSchema = z.object({
@@ -23,6 +30,20 @@ export const createInvoiceSchema = z.object({
   notes: z.string().trim().optional(),
   taxRate: z.number().min(0).max(100).optional(),
   discount: z.number().nonnegative().optional(),
+  /**
+   * Raise this invoice under GST rather than the legacy flat rate (P2-3).
+   *
+   * Opt-in per invoice rather than a global switch, so a company can start
+   * using GST without every historical invoice changing meaning. Requires the
+   * company to have a state code set — without one there is no way to tell an
+   * intra-state sale from an inter-state one.
+   */
+  useGst: z.boolean().optional(),
+  /**
+   * Buyer's state code. Falls back to the linked customer's, then to the
+   * seller's own state (the walk-in-customer case).
+   */
+  placeOfSupply: z.string().trim().length(2).optional(),
   locationId: z.string().min(1, "Pick a location"),
   lines: z.array(lineSchema).min(1, "Add at least one line"),
 });

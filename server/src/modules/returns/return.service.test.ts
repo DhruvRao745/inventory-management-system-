@@ -14,6 +14,7 @@ import { AppError } from "../../middleware/error.js";
 import * as returnService from "./return.service.js";
 import * as invService from "../invoices/inv.service.js";
 import * as stockService from "../stock/stock.service.js";
+import { availableQuantity } from "../../lib/reservations.js";
 import { resetDb, createTestCompany } from "../../test/helpers.js";
 
 async function expectAppError(promise: Promise<unknown>, statusCode: number) {
@@ -57,10 +58,24 @@ async function soldSetup() {
       lines: [{ invoiceLineId, quantity, condition, restock }],
     } as Parameters<typeof returnService.createReturn>[2]);
 
+  /** ON HAND — everything owned here, in any condition. */
   const level = () =>
     stockService
       .getStockLevel(base.company.id, base.product.id, base.location.id)
       .then(Number);
+
+  /**
+   * SELLABLE — what may actually be sold (P2-2).
+   *
+   * These became two different numbers when statuses arrived. Damaged returns
+   * now enter the ledger in the DAMAGED bucket, so on hand rises while
+   * sellable does not — the goods are owned but can never fill an order.
+   */
+  const sellable = () =>
+    availableQuantity(prisma, base.company.id, {
+      productId: base.product.id,
+      locationId: base.location.id,
+    }).then((r) => Number(r.sellable));
 
   /** Raise → approve → receive, the whole happy path. */
   const receiveFlow = async (
@@ -73,7 +88,15 @@ async function soldSetup() {
     return returnService.receiveReturn(base.company.id, base.user.id, r.id);
   };
 
-  return { ...base, invoice, invoiceLineId, raise, level, receiveFlow };
+  return {
+    ...base,
+    invoice,
+    invoiceLineId,
+    raise,
+    level,
+    sellable,
+    receiveFlow,
+  };
 }
 
 describe("sales returns — only sellable stock comes back", () => {
@@ -87,24 +110,29 @@ describe("sales returns — only sellable stock comes back", () => {
     expect(await level()).toBe(94);
   });
 
-  it("DAMAGED goods do NOT increase available stock", async () => {
-    // The headline rule. Before P1-6 these went back on the shelf and the
-    // shop would try to sell broken goods.
-    const { level, receiveFlow } = await soldSetup();
+  it("DAMAGED goods do NOT increase sellable stock", async () => {
+    // The headline rule, unchanged since P1-6: broken goods must never go
+    // back on sale. What CHANGED in P2-2 is where they go instead — they now
+    // enter the ledger as DAMAGED rather than vanishing, so the company owns
+    // 94 while only 90 may be sold.
+    const { level, sellable, receiveFlow } = await soldSetup();
     await receiveFlow(4, "DAMAGED");
 
-    expect(await level()).toBe(90); // unchanged
+    expect(await sellable()).toBe(90); // the rule that matters — unchanged
+    expect(await level()).toBe(94); // but we DO own them now
   });
 
-  it("QUARANTINE goods do NOT increase available stock", async () => {
-    const { level, receiveFlow } = await soldSetup();
+  it("QUARANTINE goods do NOT increase sellable stock", async () => {
+    const { level, sellable, receiveFlow } = await soldSetup();
     await receiveFlow(4, "QUARANTINE");
-    expect(await level()).toBe(90);
+    expect(await sellable()).toBe(90);
+    expect(await level()).toBe(94);
   });
 
-  it("damaged goods are still RECORDED, just not in the ledger", async () => {
-    // They're not available to sell, but the business must still know they
-    // came back — that's what the return document is for.
+  it("damaged goods enter the ledger in the DAMAGED bucket", async () => {
+    // Before P2-2 this asserted ZERO movements — damaged returns were noted
+    // on the document and then disappeared: not counted, not valued, invisible
+    // to a stocktake. The warehouse held goods the system denied existed.
     const { company, receiveFlow } = await soldSetup();
     const ret = await receiveFlow(4, "DAMAGED");
 
@@ -113,10 +141,12 @@ describe("sales returns — only sellable stock comes back", () => {
     expect(Number(ret.lines[0]!.quantity)).toBe(4);
     expect(ret.lines[0]!.restock).toBe(false);
 
-    const movements = await prisma.stockMovement.count({
+    const movements = await prisma.stockMovement.findMany({
       where: { companyId: company.id, type: "RETURN_IN" },
     });
-    expect(movements).toBe(0);
+    expect(movements).toHaveLength(1);
+    expect(movements[0]!.status).toBe("DAMAGED"); // owned, never sellable
+    expect(Number(movements[0]!.quantity)).toBe(4);
   });
 
   it("refuses to restock damaged goods even if asked", async () => {
@@ -124,16 +154,31 @@ describe("sales returns — only sellable stock comes back", () => {
     await expectAppError(raise(4, "DAMAGED", true), 400);
   });
 
-  it("sellable goods CAN be declined for restock", async () => {
-    // The decision is allowed in this direction — perhaps it's being
-    // written off, or sent back to the supplier.
-    const { level, receiveFlow } = await soldSetup();
+  it("sellable goods CAN be declined for restock — they go to quarantine", async () => {
+    // The decision is allowed in this direction — perhaps it's being written
+    // off, or sent back to the supplier. Since P2-2 the goods are HELD rather
+    // than vanishing: they physically came back, so pretending otherwise
+    // would be the same invisibility problem in a different costume.
+    const { company, product, location, level, sellable, receiveFlow } =
+      await soldSetup();
     await receiveFlow(4, "SELLABLE", false);
-    expect(await level()).toBe(90);
+
+    expect(await sellable()).toBe(90); // not back on sale
+    expect(await level()).toBe(94); // but accounted for
+
+    const rows = await stockService.stockLevels(company.id, {
+      take: 50,
+      skip: 0,
+    } as never);
+    const shelf = rows.find(
+      (r) => r.product.id === product.id && r.location.id === location.id
+    )!;
+    expect(Number(shelf.quarantine)).toBe(4);
   });
 
-  it("a mixed return restocks only the sellable part", async () => {
-    const { company, user, invoice, invoiceLineId, level } = await soldSetup();
+  it("a mixed return returns only the sellable part to sale", async () => {
+    const { company, user, invoice, invoiceLineId, level, sellable } =
+      await soldSetup();
     const ret = await returnService.createReturn(company.id, user.id, {
       invoiceId: invoice.id,
       lines: [
@@ -144,7 +189,8 @@ describe("sales returns — only sellable stock comes back", () => {
     await returnService.approveReturn(company.id, user.id, ret.id);
     await returnService.receiveReturn(company.id, user.id, ret.id);
 
-    expect(await level()).toBe(93); // only the 3 sellable
+    expect(await sellable()).toBe(93); // only the 3 good ones are back on sale
+    expect(await level()).toBe(95); // all 5 are owned — 3 good, 2 damaged
   });
 });
 

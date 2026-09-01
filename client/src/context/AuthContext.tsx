@@ -62,7 +62,7 @@ type AuthContextValue = {
     email: string;
     password: string;
   }) => Promise<void>;
-  logout: () => void;
+  logout: () => Promise<void>;
   /** Re-fetch user+company after settings change (e.g. rename, currency) */
   refreshMe: () => Promise<void>;
 };
@@ -117,7 +117,31 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     setCompany(data.company);
   }
 
-  function logout() {
+  /**
+   * Log out — server-side since P2-5.
+   *
+   * Clearing localStorage alone was never a logout. It removed OUR copy of the
+   * refresh token and left the token itself valid for thirty days, so anyone
+   * holding another copy could keep minting access tokens. Telling the server
+   * is what actually ends the session.
+   *
+   * The local state is cleared regardless of whether that call succeeds. If
+   * the network is down, the least useful outcome would be refusing to log the
+   * person out of the screen in front of them — the session still expires on
+   * its own, and they can revoke it later from the device list.
+   */
+  async function logout() {
+    const refresh = getRefreshToken();
+    if (refresh) {
+      try {
+        await api("/auth/logout", {
+          method: "POST",
+          body: { refreshToken: refresh },
+        });
+      } catch {
+        /* best effort — never block the user from leaving */
+      }
+    }
     setToken(null);
     setRefreshToken(null);
     setUser(null);

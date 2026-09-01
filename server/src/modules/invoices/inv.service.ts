@@ -13,7 +13,17 @@ import {
   LOCKED_TX_OPTIONS,
 } from "../../lib/locks.js";
 import { costStockOut, costReturnIn } from "../../lib/costing.js";
-import { grandTotal, summarisePayments } from "../../lib/money.js";
+import {
+  grandTotal,
+  summarisePayments,
+  invoiceTotalDecimal,
+} from "../../lib/money.js";
+import { recordAudit } from "../../lib/audit.js";
+import {
+  computeInvoiceGst,
+  stateCodeFromGstin,
+  isValidStateCode,
+} from "../../lib/gst.js";
 import {
   planAllocation,
   consumeAllocation,
@@ -25,6 +35,12 @@ import {
   formatQuantity,
   type Decimal,
 } from "../../lib/quantity.js";
+import {
+  availableQuantity,
+  replaceReservations,
+  releaseReservations,
+  consumeReservations,
+} from "../../lib/reservations.js";
 import type {
   CreateInvoiceInput,
   UpdateInvoiceInput,
@@ -35,6 +51,271 @@ type Tx = Parameters<Parameters<typeof prisma.$transaction>[0]>[0];
 
 function invRef(number: number): string {
   return `INV-${String(number).padStart(4, "0")}`;
+}
+
+/** Reservations belonging to an invoice are tagged with this source type. */
+const INVOICE_SOURCE = "invoice";
+
+/**
+ * Roll the STAMPED per-line tax up into the summary a GST invoice must print.
+ *
+ * Reads only what is stored on the lines. It does not consult a rate table, a
+ * product, or the company's current state — those may all have changed since
+ * the invoice was issued, and the invoice must not change with them.
+ */
+function summariseStampedGst(
+  lines: {
+    gstRate: Decimal | null;
+    taxableValue: Decimal | null;
+    cgstAmount: Decimal | null;
+    sgstAmount: Decimal | null;
+    igstAmount: Decimal | null;
+  }[],
+  supplyType: string | null
+) {
+  const zero = new Dec(0);
+  const byRate = new Map<
+    string,
+    {
+      gstRate: Decimal;
+      taxableValue: Decimal;
+      cgstAmount: Decimal;
+      sgstAmount: Decimal;
+      igstAmount: Decimal;
+    }
+  >();
+
+  let taxableValue = zero;
+  let cgstAmount = zero;
+  let sgstAmount = zero;
+  let igstAmount = zero;
+
+  for (const l of lines) {
+    const rate = l.gstRate ?? zero;
+    const t = l.taxableValue ?? zero;
+    const c = l.cgstAmount ?? zero;
+    const s = l.sgstAmount ?? zero;
+    const i = l.igstAmount ?? zero;
+
+    taxableValue = taxableValue.plus(t);
+    cgstAmount = cgstAmount.plus(c);
+    sgstAmount = sgstAmount.plus(s);
+    igstAmount = igstAmount.plus(i);
+
+    const key = rate.toString();
+    const row = byRate.get(key) ?? {
+      gstRate: rate,
+      taxableValue: zero,
+      cgstAmount: zero,
+      sgstAmount: zero,
+      igstAmount: zero,
+    };
+    byRate.set(key, {
+      gstRate: rate,
+      taxableValue: row.taxableValue.plus(t),
+      cgstAmount: row.cgstAmount.plus(c),
+      sgstAmount: row.sgstAmount.plus(s),
+      igstAmount: row.igstAmount.plus(i),
+    });
+  }
+
+  return {
+    supplyType,
+    taxableValue,
+    cgstAmount,
+    sgstAmount,
+    igstAmount,
+    totalTax: cgstAmount.plus(sgstAmount).plus(igstAmount),
+    byRate: [...byRate.values()].sort((a, b) => a.gstRate.comparedTo(b.gstRate)),
+  };
+}
+
+/**
+ * Work out the place of supply for an invoice (P2-3).
+ *
+ * Order of preference, most specific first:
+ *   1. what the caller explicitly said
+ *   2. the linked customer's state
+ *   3. the state embedded in the buyer's GSTIN (first two digits)
+ *   4. the seller's own state — the walk-in customer at the counter
+ *
+ * Step 3 matters because a buyer who hands over a GSTIN has already told you
+ * their state; asking for it separately just invites the two to disagree.
+ */
+async function resolvePlaceOfSupply(
+  tx: Tx,
+  companyId: string,
+  input: {
+    placeOfSupply?: string;
+    customerId?: string | null;
+    customerGstin?: string | null;
+  },
+  sellerStateCode: string | null
+): Promise<string | null> {
+  if (input.placeOfSupply) return input.placeOfSupply;
+
+  if (input.customerId) {
+    const c = await tx.customer.findFirst({
+      where: { id: input.customerId, companyId },
+      select: { stateCode: true, gstin: true },
+    });
+    if (c?.stateCode) return c.stateCode;
+    const fromCustomerGstin = stateCodeFromGstin(c?.gstin);
+    if (fromCustomerGstin) return fromCustomerGstin;
+  }
+
+  const fromGstin = stateCodeFromGstin(input.customerGstin);
+  if (fromGstin) return fromGstin;
+
+  return sellerStateCode;
+}
+
+/**
+ * Compute and stamp GST onto an invoice's lines (P2-3).
+ *
+ * Called when a GST invoice is created or edited. The numbers it writes are
+ * SNAPSHOTS — from this point the invoice carries its own tax and no later
+ * change to a product's rate, a customer's address, or the company's state can
+ * alter it. That is what makes an issued invoice a stable legal document
+ * rather than a view over today's configuration.
+ */
+async function stampGst(
+  tx: Tx,
+  companyId: string,
+  invoiceId: string
+): Promise<void> {
+  const inv = await tx.invoice.findFirst({
+    where: { id: invoiceId, companyId },
+    include: { lines: true },
+  });
+  if (!inv || inv.taxMode !== "GST") return;
+
+  const company = await tx.company.findUnique({
+    where: { id: companyId },
+    select: { stateCode: true },
+  });
+
+  const products = await tx.product.findMany({
+    where: { id: { in: inv.lines.map((l) => l.productId) }, companyId },
+    select: { id: true, gstRate: true, hsnCode: true },
+  });
+  const productById = new Map(products.map((p) => [p.id, p]));
+
+  const breakup = computeInvoiceGst({
+    lines: inv.lines.map((l) => ({
+      quantity: l.quantity,
+      unitPrice: l.unitPrice,
+      // A rate already stamped on the line wins — that's the per-line
+      // override. Otherwise take the product's current rate.
+      gstRate: l.gstRate ?? productById.get(l.productId)?.gstRate ?? null,
+    })),
+    discount: inv.discount,
+    sellerStateCode: company?.stateCode ?? null,
+    placeOfSupply: inv.placeOfSupply,
+  });
+
+  await Promise.all(
+    inv.lines.map((line, i) => {
+      const tax = breakup.lines[i]!;
+      return tx.invoiceLine.update({
+        where: { id: line.id },
+        data: {
+          hsnCode: line.hsnCode ?? productById.get(line.productId)?.hsnCode ?? null,
+          gstRate: tax.gstRate,
+          taxableValue: tax.taxableValue,
+          cgstAmount: tax.cgstAmount,
+          sgstAmount: tax.sgstAmount,
+          igstAmount: tax.igstAmount,
+        },
+      });
+    })
+  );
+
+  await tx.invoice.update({
+    where: { id: invoiceId },
+    data: { supplyType: breakup.supplyType },
+  });
+}
+
+/**
+ * Put (or re-put) a DRAFT invoice's hold on the shelf (P2-1).
+ *
+ * Only drafts reserve. Once issued the goods have physically left, recorded as
+ * SALE movements — a hold on top of that would subtract the same units twice,
+ * once as a promise and again as a fact.
+ *
+ * DRAFTING IS NEVER BLOCKED — the deliberate decision here.
+ *
+ * A draft reserves as much as the shelf can currently back, and no more. It
+ * does NOT refuse to exist when stock is short, because a draft is not a
+ * promise to the customer yet; it's work in progress. Refusing it would break
+ * the ordinary case of writing up an order before the delivery that fills it
+ * has arrived.
+ *
+ * That costs nothing in safety, because the real gate is elsewhere: ISSUING
+ * re-checks availability in full and refuses if the stock still isn't there.
+ * So a draft can be optimistic, but nothing can ever be SOLD that doesn't
+ * exist. Reserving partially also keeps the formula exactly true — reserved
+ * never exceeds on hand, so `available` can never be driven negative by a
+ * promise.
+ *
+ * The caller must already hold the stock locks for every line.
+ */
+async function reserveForInvoice(
+  tx: Tx,
+  companyId: string,
+  userId: string,
+  invoice: {
+    id: string;
+    status: string;
+    locationId: string;
+    lines: { productId: string; quantity: Decimal }[];
+  }
+): Promise<void> {
+  if (invoice.status !== "DRAFT") return;
+
+  // Several lines may name the same product — one shelf, one hold.
+  const wanted = new Map<string, Decimal>();
+  for (const line of invoice.lines) {
+    wanted.set(
+      line.productId,
+      (wanted.get(line.productId) ?? new Dec(0)).plus(line.quantity)
+    );
+  }
+
+  const holds: {
+    productId: string;
+    locationId: string;
+    quantity: Decimal;
+  }[] = [];
+
+  for (const [productId, quantity] of wanted) {
+    // Ignore this invoice's OWN existing hold when asking what's free —
+    // otherwise editing a draft competes with the copy of itself it is about
+    // to replace, and a no-op save could fail on a tight shelf.
+    const { available } = await availableQuantity(
+      tx,
+      companyId,
+      { productId, locationId: invoice.locationId },
+      { excludeSource: { sourceType: INVOICE_SOURCE, sourceId: invoice.id } }
+    );
+
+    // Hold the smaller of "what this invoice wants" and "what's actually
+    // there". Never negative: an empty shelf holds nothing rather than
+    // reserving a debt.
+    const hold = Dec.max(new Dec(0), Dec.min(quantity, available));
+    if (hold.greaterThan(0)) {
+      holds.push({ productId, locationId: invoice.locationId, quantity: hold });
+    }
+  }
+
+  await replaceReservations(
+    tx,
+    companyId,
+    userId,
+    { sourceType: INVOICE_SOURCE, sourceId: invoice.id },
+    holds
+  );
 }
 
 // Moved to lib/money.ts in P1-5 so payment.service can use it without an
@@ -144,7 +425,44 @@ export async function createInvoice(
       if (!c) throw new AppError(400, "Unknown customer");
     }
 
-    return tx.invoice.create({
+    // A draft holds its stock (P2-1). Lock every shelf BEFORE checking
+    // availability — reserving is a read-check-write, exactly the race the
+    // ledger locks exist for, and it uses the same key so a reservation and a
+    // sale queue behind each other rather than passing in the night.
+    await lockStock(
+      tx,
+      companyId,
+      input.lines.map((l) => ({
+        productId: l.productId,
+        locationId: input.locationId,
+      }))
+    );
+
+    // GST is opt-in per invoice (P2-3). A company with no state code cannot
+    // have GST computed at all — there is no way to tell an intra-state sale
+    // from an inter-state one, and guessing would put money in the wrong
+    // government's column.
+    const company = await tx.company.findUnique({
+      where: { id: companyId },
+      select: { stateCode: true },
+    });
+    if (input.useGst && !isValidStateCode(company?.stateCode)) {
+      throw new AppError(
+        400,
+        "Set your business state before raising GST invoices — it decides CGST/SGST vs IGST"
+      );
+    }
+
+    const placeOfSupply = input.useGst
+      ? await resolvePlaceOfSupply(
+          tx,
+          companyId,
+          input,
+          company?.stateCode ?? null
+        )
+      : null;
+
+    const invoice = await tx.invoice.create({
       data: {
         companyId,
         createdById,
@@ -157,15 +475,29 @@ export async function createInvoice(
         notes: input.notes,
         taxRate: input.taxRate ?? null,
         discount: input.discount ?? null,
+        taxMode: input.useGst ? "GST" : "FLAT",
+        placeOfSupply,
         locationId: input.locationId,
         lines: {
           create: input.lines.map((l, i) => ({
             productId: l.productId,
             quantity: quantities.get(`${i}`)!, // parsed + precision-checked
             unitPrice: l.unitPrice,
+            gstRate: l.gstRate ?? null, // per-line override, if given
           })),
         },
       },
+      include: invInclude,
+    });
+
+    await stampGst(tx, companyId, invoice.id);
+    await reserveForInvoice(tx, companyId, createdById, invoice);
+
+    // Re-read so the caller gets the stamped tax rather than the pre-stamp
+    // snapshot — otherwise the response shows nulls for tax that was, in fact,
+    // computed and saved a moment ago.
+    return tx.invoice.findUniqueOrThrow({
+      where: { id: invoice.id },
       include: invInclude,
     });
   }, LOCKED_TX_OPTIONS);
@@ -202,19 +534,15 @@ export async function listInvoices(companyId: string, q: ListInvoiceQuery) {
     issuedAt: inv.issuedAt,
     createdAt: inv.createdAt,
     itemCount: inv.lines.length,
-    total: grandTotal(
-      // Decimal × Decimal for the line, then out to a number once at the end.
-      // Doing it the other way — Number() per line, then multiplying — is how
-      // 2.5 kg × ₹33.33 quietly becomes ₹83.32499999999999.
-      Number(
-        inv.lines.reduce(
-          (s, l) => s.plus(l.unitPrice.times(l.quantity)),
-          new Dec(0)
-        )
-      ),
-      inv.taxRate,
-      inv.discount
-    ),
+    // Routed by taxMode (P2-3): a GST invoice sums the tax STAMPED on its
+    // lines; a legacy FLAT one uses its stored whole-invoice rate. Neither is
+    // recomputed from today's rates — an issued invoice's total must never
+    // move because a rate changed afterwards.
+    //
+    // Still Decimal throughout, out to a number once at the end. The other way
+    // round — Number() per line, then multiplying — is how 2.5 kg × ₹33.33
+    // quietly becomes ₹83.32499999999999.
+    total: Number(invoiceTotalDecimal(inv)),
   }));
 
   return { items: rows, total, take: q.take, skip: q.skip };
@@ -233,10 +561,17 @@ export async function getInvoice(companyId: string, id: string) {
     (s, l) => s.plus(l.unitPrice.times(l.quantity)),
     new Dec(0)
   );
-  const total = new Dec(
-    grandTotal(Number(subtotal), inv.taxRate, inv.discount)
-  );
-  return { ...inv, ...summarisePayments(total, inv.payments) };
+  const total = invoiceTotalDecimal(inv);
+
+  // A GST invoice also carries its tax breakdown — the per-rate summary a GST
+  // invoice is legally required to print. Built from the STAMPED line amounts,
+  // never recomputed, for the reason given on invoiceTotalDecimal.
+  const gst =
+    inv.taxMode === "GST"
+      ? summariseStampedGst(inv.lines, inv.supplyType)
+      : null;
+
+  return { ...inv, subtotal, gst, ...summarisePayments(total, inv.payments) };
 }
 
 export async function updateInvoice(
@@ -247,7 +582,13 @@ export async function updateInvoice(
   return prisma.$transaction(async (tx) => {
     const existing = await tx.invoice.findFirst({
       where: { id, companyId },
-      select: { id: true, status: true },
+      select: {
+        id: true,
+        status: true,
+        locationId: true,
+        createdById: true,
+        lines: { select: { productId: true } },
+      },
     });
     if (!existing) throw new AppError(404, "Invoice not found");
     if (existing.status !== "DRAFT") {
@@ -255,6 +596,24 @@ export async function updateInvoice(
     }
 
     if (input.locationId) await assertLocation(tx, companyId, input.locationId);
+
+    // Lock the OLD shelves and the NEW ones together, before touching either
+    // (P2-1). An edit can move an invoice to a different location or swap its
+    // products, so the hold is released from one shelf and taken on another —
+    // both sides have to be held still for that to be atomic. lockStock sorts
+    // the keys, so this can't deadlock against a concurrent edit going the
+    // other way.
+    const newLocationId = input.locationId ?? existing.locationId;
+    await lockStock(tx, companyId, [
+      ...existing.lines.map((l) => ({
+        productId: l.productId,
+        locationId: existing.locationId,
+      })),
+      ...(input.lines ?? []).map((l) => ({
+        productId: l.productId,
+        locationId: newLocationId,
+      })),
+    ]);
     let quantities = new Map<string, Decimal>();
     if (input.lines) {
       const products = await assertProducts(
@@ -275,7 +634,7 @@ export async function updateInvoice(
       if (!c) throw new AppError(400, "Unknown customer");
     }
 
-    return tx.invoice.update({
+    const updated = await tx.invoice.update({
       where: { id },
       data: {
         customerId:
@@ -307,7 +666,24 @@ export async function updateInvoice(
       },
       include: invInclude,
     });
-  });
+
+    // Re-stamp the tax to match the new lines (P2-3). Editing a DRAFT is the
+    // only time this is allowed to happen — the invoice hasn't been issued, so
+    // nothing has been sent to a customer and no legal record is being
+    // rewritten. Once issued, the stamped figures are frozen for good.
+    await stampGst(tx, companyId, id);
+
+    // Re-place the hold to match what the invoice now says. This is a REPLACE,
+    // not an adjustment — the invoice's claim is whatever its current lines
+    // are, and deriving that from a delta would drift the moment anything else
+    // touched the row.
+    await reserveForInvoice(tx, companyId, existing.createdById, updated);
+
+    return tx.invoice.findUniqueOrThrow({
+      where: { id },
+      include: invInclude,
+    });
+  }, LOCKED_TX_OPTIONS);
 }
 
 /**
@@ -361,20 +737,28 @@ export async function issueInvoice(
         },
       });
 
-      // Oversell guard: current on-hand for this product at this location.
-      const sum = await tx.stockMovement.aggregate({
-        where: {
-          companyId,
-          productId: line.productId,
-          locationId: inv.locationId,
-        },
-        _sum: { quantity: true },
-      });
-      const current = sum._sum.quantity ?? new Dec(0);
-      if (current.lessThan(line.quantity)) {
+      // Oversell guard, now against AVAILABLE — but ignoring this invoice's
+      // OWN hold (P2-1).
+      //
+      // This exclusion is the crux of the whole feature. A draft reserves its
+      // lines, so at issue time the stock it needs is already spoken for by
+      // itself. Count that against it and every draft blocks its own issue:
+      // reserve 5, then be told 5 are unavailable, forever. Excluding only
+      // this invoice's reservation means it can take exactly what it set
+      // aside, while everyone ELSE's holds still protect them from it.
+      const { onHand, reserved, available } = await availableQuantity(
+        tx,
+        companyId,
+        { productId: line.productId, locationId: inv.locationId },
+        { excludeSource: { sourceType: INVOICE_SOURCE, sourceId: inv.id } }
+      );
+      if (available.lessThan(line.quantity)) {
+        const other = reserved.greaterThan(0)
+          ? ` (${formatQuantity(onHand)} on hand, ${formatQuantity(reserved)} reserved elsewhere)`
+          : "";
         throw new AppError(
           400,
-          `Not enough stock of ${product?.name ?? "item"}: only ${formatQuantity(current)} ${product?.unit ?? ""} at this location`.trim()
+          `Not enough stock of ${product?.name ?? "item"}: only ${formatQuantity(available)} ${product?.unit ?? ""} available at this location${other}`.trim()
         );
       }
 
@@ -418,6 +802,26 @@ export async function issueInvoice(
 
       if (plan) await consumeAllocation(tx, movement.id, plan);
     }
+
+    // The promise became a fact. Mark the holds CONSUMED rather than releasing
+    // them: released would suggest the stock was let go, when it actually left
+    // as a sale. Either way they stop counting against availability — but only
+    // one of them is true, and the reservation history is read by humans.
+    await consumeReservations(tx, companyId, {
+      sourceType: INVOICE_SOURCE,
+      sourceId: id,
+    });
+
+    await recordAudit(tx, {
+      companyId,
+      userId,
+      action: "invoice.issue",
+      entity: "invoice",
+      entityId: id,
+      summary: `${ref} issued — stock deducted`,
+      before: { status: "DRAFT" },
+      after: { status: "ISSUED" },
+    });
 
     return tx.invoice.update({
       where: { id },
@@ -549,6 +953,26 @@ export async function cancelInvoice(
         }
       }
     }
+
+    // Cancelling a DRAFT never touched the ledger, but it WAS holding stock —
+    // let it go, or a cancelled draft would keep goods off the shelf forever
+    // with nothing left to explain why (P2-1). Harmless on an issued invoice:
+    // its holds were consumed at issue, so there is nothing ACTIVE to release.
+    await releaseReservations(tx, companyId, {
+      sourceType: INVOICE_SOURCE,
+      sourceId: id,
+    });
+
+    await recordAudit(tx, {
+      companyId,
+      userId,
+      action: "invoice.cancel",
+      entity: "invoice",
+      entityId: id,
+      summary: `${invRef(inv.number)} cancelled${inv.status === "ISSUED" ? " — stock restored" : ""}`,
+      before: { status: inv.status },
+      after: { status: "CANCELLED" },
+    });
 
     return tx.invoice.update({
       where: { id },

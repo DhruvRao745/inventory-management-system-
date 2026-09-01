@@ -12,6 +12,7 @@ import { Router } from "express";
 import { z } from "zod";
 import bcrypt from "bcryptjs";
 import { prisma } from "../../lib/prisma.js";
+import { recordChange } from "../../lib/audit.js";
 import { asyncHandler, AppError } from "../../middleware/error.js";
 import {
   requireAuth,
@@ -108,10 +109,33 @@ usersRouter.patch(
         throw new AppError(400, "You can't demote your own account");
     }
 
-    const user = await prisma.user.update({
-      where: { id: target.id },
-      data: input,
-      select: publicFields,
+    // Permission changes are on PRD §15's list of things that must be
+    // traceable, and for good reason: "who made this person an admin, and
+    // when?" is unanswerable from the row itself, which only shows the result.
+    const user = await prisma.$transaction(async (tx) => {
+      const updated = await tx.user.update({
+        where: { id: target.id },
+        data: input,
+        select: publicFields,
+      });
+
+      await recordChange(tx, {
+        companyId,
+        userId: req.user!.userId,
+        action:
+          input.role && input.role !== target.role
+            ? "user.role_change"
+            : input.isActive === false
+              ? "user.deactivate"
+              : "user.reactivate",
+        entity: "user",
+        entityId: target.id,
+        summary: `${target.name} updated`,
+        before: { role: target.role, isActive: target.isActive },
+        after: { role: updated.role, isActive: updated.isActive },
+      });
+
+      return updated;
     });
     res.json(user);
   })

@@ -108,7 +108,8 @@ productsRouter.patch(
     const product = await productService.updateProduct(
       req.user!.companyId,
       req.params.id,
-      input
+      input,
+      req.user!.userId
     );
     res.json(product);
   })

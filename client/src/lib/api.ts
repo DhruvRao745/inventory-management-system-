@@ -75,6 +75,13 @@ async function tryRefresh(): Promise<boolean> {
         if (!res.ok) return false;
         const data = await res.json();
         setToken(data.token);
+
+        // CRITICAL since P2-5: refresh tokens ROTATE. The server retires the
+        // token we just sent and returns a successor. If we don't store it,
+        // the next refresh presents a retired token — which the server reads
+        // as a replay, revokes the whole session family, and logs the user out
+        // for no reason they could possibly understand.
+        if (data.refreshToken) setRefreshToken(data.refreshToken);
         return true;
       } catch {
         return false;

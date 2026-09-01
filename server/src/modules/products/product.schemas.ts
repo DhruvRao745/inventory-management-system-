@@ -9,6 +9,15 @@ const baseProductSchema = z.object({
   name: z.string().trim().min(2, "Name is too short"),
   description: z.string().trim().optional(),
   hsnCode: z.string().trim().max(20).optional(),
+  /**
+   * GST rate for this product, as a percentage (P2-3).
+   *
+   * On the PRODUCT because the rate follows the goods: a shop selling books
+   * (nil-rated) alongside electronics (28%) cannot be described by any single
+   * invoice-level rate. Copied onto each invoice line at write time, so
+   * changing it here never alters an invoice already issued.
+   */
+  gstRate: z.number().min(0).max(100).optional(),
   categoryId: z.string().optional(),
   preferredSupplierId: z.string().optional(),
   unit: z.string().trim().min(1).default("pcs"),

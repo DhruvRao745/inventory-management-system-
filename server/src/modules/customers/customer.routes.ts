@@ -8,6 +8,7 @@
  */
 import { Router } from "express";
 import { z } from "zod";
+import { isValidStateCode } from "../../lib/gst.js";
 import { prisma } from "../../lib/prisma.js";
 import { asyncHandler, AppError } from "../../middleware/error.js";
 import {
@@ -21,6 +22,16 @@ const createSchema = z.object({
   email: z.string().trim().email("Invalid email").optional().or(z.literal("")),
   phone: z.string().trim().optional(),
   address: z.string().trim().optional(),
+  // Buyer's GST details (P2-3). stateCode is the place of supply for goods —
+  // it is what makes an invoice to this customer intra- or inter-state.
+  gstin: z.string().trim().max(20).optional(),
+  stateCode: z
+    .string()
+    .trim()
+    .optional()
+    .refine((v) => !v || isValidStateCode(v), {
+      message: "Not a valid GST state code",
+    }),
   notes: z.string().trim().optional(),
 });
 const updateSchema = createSchema.partial().extend({

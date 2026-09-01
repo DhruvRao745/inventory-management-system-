@@ -30,9 +30,9 @@ import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error.js";
 import { lockDocument, LOCKED_TX_OPTIONS } from "../../lib/locks.js";
+import { recordAudit } from "../../lib/audit.js";
 import {
-  lineSubtotal,
-  grandTotalDecimal,
+  invoiceTotalDecimal,
   summarisePayments,
   type PaymentSummary,
 } from "../../lib/money.js";
@@ -45,13 +45,29 @@ const paymentInclude = {
   invoice: { select: { id: true, number: true, customerName: true } },
 } as const;
 
-/** What an invoice is worth, from its own lines. */
+/**
+ * What an invoice is worth.
+ *
+ * Routed by taxMode since P2-3 — a GST invoice's total is the sum of the tax
+ * STAMPED on its lines, not a recomputation. This matters here more than
+ * anywhere: a payment is validated against the balance, so if the total were
+ * recomputed under changed rates, an invoice that was paid in full could
+ * quietly develop an outstanding balance months later.
+ */
 function invoiceTotal(inv: {
-  lines: { quantity: Prisma.Decimal; unitPrice: Prisma.Decimal }[];
+  taxMode?: string | null;
+  lines: {
+    quantity: Prisma.Decimal;
+    unitPrice: Prisma.Decimal;
+    taxableValue?: Prisma.Decimal | null;
+    cgstAmount?: Prisma.Decimal | null;
+    sgstAmount?: Prisma.Decimal | null;
+    igstAmount?: Prisma.Decimal | null;
+  }[];
   taxRate: Prisma.Decimal | null;
   discount: Prisma.Decimal | null;
 }): Prisma.Decimal {
-  return grandTotalDecimal(lineSubtotal(inv.lines), inv.taxRate, inv.discount);
+  return invoiceTotalDecimal(inv);
 }
 
 /**
@@ -66,9 +82,21 @@ export async function paymentSummaryFor(
   const inv = await tx.invoice.findFirst({
     where: { id: invoiceId, companyId },
     select: {
+      taxMode: true, // decides which total calculation applies (P2-3)
       taxRate: true,
       discount: true,
-      lines: { select: { quantity: true, unitPrice: true } },
+      lines: {
+          select: {
+            quantity: true,
+            unitPrice: true,
+            // Stamped GST (P2-3) — needed so invoiceTotal can SUM the tax
+            // that was saved rather than recompute it.
+            taxableValue: true,
+            cgstAmount: true,
+            sgstAmount: true,
+            igstAmount: true,
+          },
+        },
       payments: { select: { amount: true } },
     },
   });
@@ -122,9 +150,21 @@ export async function recordPayment(
         id: true,
         number: true,
         status: true,
+        taxMode: true, // decides which total calculation applies (P2-3)
         taxRate: true,
         discount: true,
-        lines: { select: { quantity: true, unitPrice: true } },
+        lines: {
+          select: {
+            quantity: true,
+            unitPrice: true,
+            // Stamped GST (P2-3) — needed so invoiceTotal can SUM the tax
+            // that was saved rather than recompute it.
+            taxableValue: true,
+            cgstAmount: true,
+            sgstAmount: true,
+            igstAmount: true,
+          },
+        },
         payments: { select: { amount: true } },
       },
     });
@@ -168,6 +208,21 @@ export async function recordPayment(
 
     const after = summarisePayments(total, [...inv.payments, { amount }]);
     await syncInvoiceStatus(tx, inv.id, after);
+
+    await recordAudit(tx, {
+      companyId,
+      userId,
+      action: "payment.record",
+      entity: "payment",
+      entityId: payment.id,
+      summary: `${amount.toString()} received against INV-${String(inv.number).padStart(4, "0")} by ${input.method}`,
+      after: {
+        invoiceId: inv.id,
+        amount: amount.toString(),
+        method: input.method,
+        balanceAfter: after.balanceAmount.toString(),
+      },
+    });
 
     return { payment, summary: after };
   }, LOCKED_TX_OPTIONS);
@@ -258,9 +313,21 @@ export async function outstandingBalances(companyId: string) {
       number: true,
       customerName: true,
       issuedAt: true,
+      taxMode: true, // decides which total calculation applies (P2-3)
       taxRate: true,
       discount: true,
-      lines: { select: { quantity: true, unitPrice: true } },
+      lines: {
+          select: {
+            quantity: true,
+            unitPrice: true,
+            // Stamped GST (P2-3) — needed so invoiceTotal can SUM the tax
+            // that was saved rather than recompute it.
+            taxableValue: true,
+            cgstAmount: true,
+            sgstAmount: true,
+            igstAmount: true,
+          },
+        },
       payments: { select: { amount: true } },
     },
     orderBy: { number: "desc" },
