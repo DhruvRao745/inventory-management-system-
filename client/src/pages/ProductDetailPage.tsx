@@ -271,7 +271,13 @@ export function ProductDetailPage() {
                         {formatQty(l.available, product.unit)} available
                         {l.lowStock && " · low!"}
                       </span>
-                      {canWrite && blocked > 0 && (
+                      {/* Shown whenever there is ANY stock here — not only
+                          when something is already blocked. Marking good stock
+                          as damaged is the main reason anyone opens this, and
+                          gating the button on `blocked > 0` made that
+                          impossible: you could only reclassify stock that had
+                          already been reclassified. */}
+                      {canWrite && qtyNum(l.quantity) > 0 && (
                         <button
                           type="button"
                           onClick={() => setReclassifying(l)}

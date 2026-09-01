@@ -1,9 +1,9 @@
 # StockPilot — Functional Verification Checklist
 
 **System:** StockPilot Inventory Management
-**Version:** P0 hardening + P1 features 1–9
+**Version:** P0 hardening + P1 features 1–9 + P2 features 1–6
 **Prepared for:** Senior review
-**Date:** 30 August 2026
+**Date:** 1 September 2026
 
 ---
 
@@ -11,7 +11,15 @@
 
 This document lets a reviewer verify every shipped feature by hand, in order. Each test states what to do and what should happen. Tick the box when the observed result matches.
 
-Features still in development (stock reservations) are **not** included — they are not ready for review.
+## Sections at a glance
+
+| Sections | Covers | Interface |
+|---|---|---|
+| 1–12 | Core system (P0 + P1) | Full UI |
+| 13–15 | Reservations, stock conditions, reporting (P2) | Full UI |
+| 16–18 | GST, sessions, audit log (P2) | **API only — no screens yet** |
+
+Sections 16–18 are backend-complete but have no user interface. They are listed so their behaviour is on record; verifying them needs a developer. A tester should work through 1–15.
 
 ## Before you start
 
@@ -125,7 +133,7 @@ Features still in development (stock reservations) are **not** included — they
 | 7.1 | Raise a return against an issued invoice for 5 units, condition **Sellable** | Created as REQUESTED; stock unchanged | ☐ |
 | 7.2 | Approve, then mark received | Stock rises by 5 | ☐ |
 | 7.3 | Raise a return with condition **Damaged** | The restock option is disabled and cannot be selected | ☐ |
-| 7.4 | Mark the damaged return received | Return is recorded but stock does **not** rise | ☐ |
+| 7.4 | Mark the damaged return received | **On hand rises**, but available does **not** — the units appear under Damaged | ☐ |
 | 7.5 | Attempt to return more than was sold | Refused | ☐ |
 | 7.6 | Record a refund on a received return | Refund amount is stored against the return | ☐ |
 
@@ -201,14 +209,111 @@ Features still in development (stock reservations) are **not** included — they
 
 ---
 
+## 13. Reservations — stock a draft invoice is holding
+
+Since P2, a **draft** invoice sets stock aside. The goods stay on the shelf and are still owned; they simply can't be promised to a second customer.
+
+| # | Step | Expected result | ✓ |
+|---|---|---|---|
+| 13.1 | Note a product's **available** figure at a location | e.g. 50 available | ☐ |
+| 13.2 | Create an invoice for 10 of that product and leave it as a **draft** | Saved; not issued | ☐ |
+| 13.3 | Reopen the product | **On hand still 50**, but available now **40** — a blue "Reserved 10" band appears | ☐ |
+| 13.4 | Try to sell 45 of that product directly from the Stock page | Refused, and the message says how much is reserved | ☐ |
+| 13.5 | Issue the draft invoice | On hand drops to 40; reserved returns to 0 — the stock has actually left | ☐ |
+| 13.6 | Create another draft for 5, then **cancel** it | Available returns to its previous figure; nothing stays held | ☐ |
+| 13.7 | Create a draft for more units than exist | The draft still **saves**, holding only what was available | ☐ |
+| 13.8 | Try to issue that draft | **Refused** — a draft may be optimistic, a sale may not | ☐ |
+
+> **Key principle:** a draft is work in progress, not a promise. You can write up an order before the delivery that fills it arrives. Issuing is where the system says no.
+
+---
+
+## 14. Stock conditions — damaged, quarantine, expired
+
+Stock can be **owned without being sellable**. A crushed box is still company property: it belongs in the valuation and a stocktake must find it — but no order should ever be filled from it.
+
+| # | Step | Expected result | ✓ |
+|---|---|---|---|
+| 14.1 | Open a product with stock at a location | Shows "N available" | ☐ |
+| 14.2 | Click **Change condition** | Dialog opens showing that location's quantities | ☐ |
+| 14.3 | Move 3 units from **Available** to **Damaged**, with a reason | Saved | ☐ |
+| 14.4 | Check the on-hand figure | **Unchanged** — nothing physically moved | ☐ |
+| 14.5 | Check available | Down by 3; a red "Damaged 3" band appears | ☐ |
+| 14.6 | Open the product's history | **Two** new ADJUSTMENT entries (−3 and +3), one tagged DAMAGED | ☐ |
+| 14.7 | Move those 3 back from **Damaged** to **Available** | Bar returns to all-green; two more entries recorded | ☐ |
+| 14.8 | Create a draft invoice reserving most of the stock, then try to quarantine more than the remainder | Refused — reserved goods are promised and can't be quarantined | ☐ |
+| 14.9 | Sell a batch-tracked product that has a quarantined lot expiring soonest | The **quarantined lot is skipped**; stock comes from a good lot | ☐ |
+
+> **Key principle:** conditions are never edited in place. Moving stock between conditions records two ledger entries with a name and time against them — so "these units sat in quarantine for a week" stays answerable.
+
+---
+
+## 15. Reporting — what you cannot sell
+
+| # | Step | Expected result | ✓ |
+|---|---|---|---|
+| 15.1 | Damage some stock (test 14.3), then open **Reports** | A "Stock you can't sell" section appears | ☐ |
+| 15.2 | Check the headline figure | Shows the **money value** tied up, not just a unit count | ☐ |
+| 15.3 | Check the table | Lists the product with its quarantine / damaged / expired columns | ☐ |
+| 15.4 | Return all stock to Available, reload | Section reads "Nothing blocked" | ☐ |
+| 15.5 | Issue an invoice, then check the dashboard | Revenue, gross profit and margin update | ☐ |
+| 15.6 | Reserve stock with a draft, then check low-stock warnings | Low stock is judged on **available** — a fully reserved shelf counts as low | ☐ |
+
+---
+
+## 16. GST invoicing — **API only, no screen yet**
+
+Backend-complete; there is no way to raise a GST invoice from the interface. Recorded here so the behaviour is on file.
+
+| # | Behaviour | Status |
+|---|---|---|
+| 16.1 | Sale within the seller's state splits into CGST + SGST | ✅ implemented |
+| 16.2 | Sale to another state is charged as IGST | ✅ implemented |
+| 16.3 | Each product carries its own GST rate; a line may override it | ✅ implemented |
+| 16.4 | Tax is stamped on the invoice at issue and **never recalculated** — changing a rate later does not alter past invoices | ✅ implemented |
+| 16.5 | Invoices raised before GST keep their original flat-rate calculation | ✅ implemented |
+| 16.6 | Discounts are apportioned across lines **before** tax | ✅ implemented |
+
+> **Not claimed as GST compliance.** Reverse charge, composition scheme, e-way bills, e-invoicing/IRN, exports and SEZ, input-tax-credit matching and GSTR filing are **not** implemented.
+
+---
+
+## 17. Sessions and sign-in security — **API only, no screen yet**
+
+| # | Behaviour | Status |
+|---|---|---|
+| 17.1 | Logging out ends the session **on the server** — the token dies everywhere, not just in that browser | ✅ implemented |
+| 17.2 | Refresh tokens are replaced on every use; a reused one revokes that whole sign-in | ✅ implemented |
+| 17.3 | Changing a password signs out every other device | ✅ implemented |
+| 17.4 | A user's signed-in devices can be listed and revoked individually | ✅ API only |
+
+**Note for the tester:** everyone was signed out once when this went live. That is expected — sessions created before the change genuinely did not exist on the server. It happens once per device.
+
+---
+
+## 18. Audit trail — **API only, no screen yet**
+
+| # | Behaviour | Status |
+|---|---|---|
+| 18.1 | Successful and **failed** sign-ins are recorded | ✅ implemented |
+| 18.2 | Price and product edits record the old and new value | ✅ implemented |
+| 18.3 | Role changes, deactivations, payments, cancellations and stock reclassifications are recorded | ✅ implemented |
+| 18.4 | Passwords never appear in the log | ✅ implemented |
+| 18.5 | An action that fails leaves no log entry — the record and the event succeed or fail together | ✅ implemented |
+
+> Ordinary stock movements are **deliberately not** duplicated here: the stock ledger is already permanent and unedited, so it is its own audit trail.
+
+---
+
 ## Known limitations
 
 These are recorded deliberately and are not defects to be raised:
 
-1. **Stock reservations** are built but not released. Draft invoices do not yet hold stock.
+1. **No screens for GST, sessions, or the audit log** (sections 16–18). The functionality exists and is tested; only the interface is outstanding.
 2. **No screens yet** for Goods Receipt creation outside a purchase order, or for supplier return editing after sending.
-3. **Automated tests do not cover database constraints.** The test database is built by schema push rather than by running migrations, so the 34 integrity constraints are active in production but not exercised by the test suite.
-4. **GST is a single tax rate.** CGST/SGST/IGST splitting and place-of-supply rules are not yet implemented.
+3. **Automated tests do not cover database constraints.** The test database is built by schema push rather than by running migrations, so the **38** integrity constraints are active in production but not exercised by the test suite.
+4. **Expired stock is reported, not written off automatically.** Nothing changes condition on a schedule — a person decides. This is intentional: stock quietly reclassifying itself overnight would be harder to explain than to prevent.
+5. **Access tokens remain valid for up to 15 minutes after a session is revoked.** Checking every request against the database would make it a single point of failure for the whole system; the short lifetime is the trade.
 
 ---
 
