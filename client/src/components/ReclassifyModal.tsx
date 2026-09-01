@@ -52,8 +52,15 @@ export function ReclassifyModal({
   onClose: () => void;
   onDone: () => void;
 }) {
-  const [fromStatus, setFromStatus] = useState<StockStatus>("QUARANTINE");
-  const [toStatus, setToStatus] = useState<StockStatus>("AVAILABLE");
+  // Default to the move people actually make: marking good stock as damaged.
+  //
+  // This opened on QUARANTINE → AVAILABLE at first, which reads sensibly but
+  // is wrong in practice — most shelves hold nothing in quarantine, so the
+  // dialog opened saying "0 pcs here / up to 0" and could do nothing until the
+  // dropdown was changed. Defaulting to a state the user must fix before they
+  // can act makes the feature look broken on first contact.
+  const [fromStatus, setFromStatus] = useState<StockStatus>("AVAILABLE");
+  const [toStatus, setToStatus] = useState<StockStatus>("DAMAGED");
   const [quantity, setQuantity] = useState("");
   const [note, setNote] = useState("");
   const [error, setError] = useState<string | null>(null);
