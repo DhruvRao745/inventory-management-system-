@@ -1,9 +1,9 @@
 # StockPilot — Functional Verification Checklist
 
 **System:** StockPilot Inventory Management
-**Version:** P0 hardening + P1 features 1–9 + P2 features 1–6
+**Version:** P0 hardening + P1 features 1–9 + P2 features 1–6 + P3 features 1–4
 **Prepared for:** Senior review
-**Date:** 1 September 2026
+**Date:** 2 September 2026
 
 ---
 
@@ -16,10 +16,10 @@ This document lets a reviewer verify every shipped feature by hand, in order. Ea
 | Sections | Covers | Interface |
 |---|---|---|
 | 1–12 | Core system (P0 + P1) | Full UI |
-| 13–15 | Reservations, stock conditions, reporting (P2) | Full UI |
-| 16–18 | GST, sessions, audit log (P2) | **API only — no screens yet** |
+| 13–18 | Reservations, stock conditions, GST, sessions, audit log (P2) | Full UI |
+| 19–22 | Purchase automation, analytics, forecasting, point of sale (P3) | Full UI |
 
-Sections 16–18 are backend-complete but have no user interface. They are listed so their behaviour is on record; verifying them needs a developer. A tester should work through 1–15.
+Every section is now testable from the interface. Work through them in order.
 
 ## Before you start
 
@@ -27,6 +27,7 @@ Sections 16–18 are backend-complete but have no user interface. They are liste
 |---|---|
 | Account | An ADMIN login. Some steps also need a STAFF login to verify permissions. |
 | Data | At least two locations, one supplier, one customer, and three products. |
+| GST | If your business is registered, set a **state code** in Settings first. Several sections depend on it. |
 | Note | Tests run in order. Later sections depend on stock created earlier. |
 
 **Reference numbers** follow fixed prefixes: `INV-` invoices, `PO-` purchase orders, `GRN-` deliveries, `SRT-` supplier returns, `RET-` sales returns, `CNT-` stock counts.
@@ -51,6 +52,9 @@ Sections 16–18 are backend-complete but have no user interface. They are liste
 |---|---|---|---|
 | 2.1 | Create a product with SKU, name, unit and cost | Saved and listed | ☐ |
 | 2.2 | Create a second product with the **same SKU** | Rejected — SKU must be unique within the company | ☐ |
+| 2.2a | **If your business has a state code set:** create a product leaving GST rate blank | Refused. "Not set" is not offered, and the form asks you to choose a rate | ☐ |
+| 2.2b | Set the rate to **0%** and save | Accepted — nil-rated is a real answer | ☐ |
+| 2.2c | Edit an older product that has no GST rate | You are asked for one before it will save | ☐ |
 | 2.3 | Record a PURCHASE of 100 units at Location A | Stock at A becomes 100 | ☐ |
 | 2.4 | Record a SALE of 30 units at Location A | Stock becomes 70 | ☐ |
 | 2.5 | Attempt to sell 200 units | **Refused** — stock may never go negative | ☐ |
@@ -58,6 +62,8 @@ Sections 16–18 are backend-complete but have no user interface. They are liste
 | 2.7 | Open the product's movement history | Every step above appears as a separate dated entry | ☐ |
 
 > **Key principle:** stock is never stored as a number. It is the sum of all movements, and movements are never edited or deleted — corrections are added as new entries. This is what makes the history trustworthy.
+
+> **Why 2.2a refuses rather than defaulting to 0%:** a blank rate and a 0% rate are different facts. Blank means nobody decided; 0% means the goods are nil-rated or exempt. If blank were treated as zero, the invoice would print "CGST @ 0%" — which on a tax document is a claim about the goods, not a note about an empty field. Businesses not registered for GST are never asked.
 
 ### 2A. Decimal quantities
 
@@ -261,47 +267,138 @@ Stock can be **owned without being sellable**. A crushed box is still company pr
 
 ---
 
-## 16. GST invoicing — **API only, no screen yet**
+## 16. GST invoicing
 
-Backend-complete; there is no way to raise a GST invoice from the interface. Recorded here so the behaviour is on file.
+**Setup:** Settings → set your business **state code** (and GSTIN). Give one product an 18% rate.
 
-| # | Behaviour | Status |
-|---|---|---|
-| 16.1 | Sale within the seller's state splits into CGST + SGST | ✅ implemented |
-| 16.2 | Sale to another state is charged as IGST | ✅ implemented |
-| 16.3 | Each product carries its own GST rate; a line may override it | ✅ implemented |
-| 16.4 | Tax is stamped on the invoice at issue and **never recalculated** — changing a rate later does not alter past invoices | ✅ implemented |
-| 16.5 | Invoices raised before GST keep their original flat-rate calculation | ✅ implemented |
-| 16.6 | Discounts are apportioned across lines **before** tax | ✅ implemented |
+| # | Step | Expected result | ✓ |
+|---|---|---|---|
+| 16.1 | Create an invoice, tick **GST invoice**, leave place of supply as your own state | Lines show **CGST + SGST**, each half the rate. A `CGST+SGST` badge appears by the invoice number | ☐ |
+| 16.2 | Change place of supply to a different state, save | Tax switches to a single **IGST** line; badge changes to `IGST` | ☐ |
+| 16.3 | Press **Save changes** on a GST draft | Tax figures are still shown afterwards — they must not vanish on save | ☐ |
+| 16.4 | Override the rate on one line to 12%, save | That line uses 12%; the others keep the product rate | ☐ |
+| 16.5 | Issue the invoice, then change the product's GST rate | The issued invoice is **unchanged** — tax was stamped at issue | ☐ |
+| 16.6 | Print / PDF an inter-state invoice | Shows IGST only, never CGST/SGST | ☐ |
+| 16.7 | Add a discount to a GST invoice | Discount is spread across lines **before** tax is calculated | ☐ |
+| 16.8 | Raise an invoice **without** ticking GST | Uses the flat rate; no GST rows appear | ☐ |
+
+> **Key principle:** tax is calculated once and written onto the invoice. An issued invoice is a legal document — if tax were recalculated on every view, changing a rate today would silently rewrite last year's invoices, and the customer's copy would stop matching yours.
 
 > **Not claimed as GST compliance.** Reverse charge, composition scheme, e-way bills, e-invoicing/IRN, exports and SEZ, input-tax-credit matching and GSTR filing are **not** implemented.
 
 ---
 
-## 17. Sessions and sign-in security — **API only, no screen yet**
+## 17. Sessions and sign-in security
 
-| # | Behaviour | Status |
-|---|---|---|
-| 17.1 | Logging out ends the session **on the server** — the token dies everywhere, not just in that browser | ✅ implemented |
-| 17.2 | Refresh tokens are replaced on every use; a reused one revokes that whole sign-in | ✅ implemented |
-| 17.3 | Changing a password signs out every other device | ✅ implemented |
-| 17.4 | A user's signed-in devices can be listed and revoked individually | ✅ API only |
+**Where:** Settings → Security panel.
 
-**Note for the tester:** everyone was signed out once when this went live. That is expected — sessions created before the change genuinely did not exist on the server. It happens once per device.
+| # | Step | Expected result | ✓ |
+|---|---|---|---|
+| 17.1 | Sign in on a second browser, then open Settings → Security | Both sessions are listed, with device and last-used time | ☐ |
+| 17.2 | Sign out from the app | You return to login and cannot get back with the Back button | ☐ |
+| 17.3 | Revoke the *other* browser's session, then use that browser | Within about 15 minutes it is signed out and must log in again | ☐ |
+| 17.4 | Change your password | Every **other** device is signed out; the one you changed it on stays in | ☐ |
+| 17.5 | Log in with the new password | Works. The old password no longer does | ☐ |
+
+> **The 15-minute delay in 17.3 is deliberate**, not a bug. Access tokens are short-lived and checked without a database lookup; verifying every request against the database would make it a single point of failure for the whole system. Revocation takes effect at the next token refresh.
 
 ---
 
-## 18. Audit trail — **API only, no screen yet**
+## 18. Audit trail
 
-| # | Behaviour | Status |
-|---|---|---|
-| 18.1 | Successful and **failed** sign-ins are recorded | ✅ implemented |
-| 18.2 | Price and product edits record the old and new value | ✅ implemented |
-| 18.3 | Role changes, deactivations, payments, cancellations and stock reclassifications are recorded | ✅ implemented |
-| 18.4 | Passwords never appear in the log | ✅ implemented |
-| 18.5 | An action that fails leaves no log entry — the record and the event succeed or fail together | ✅ implemented |
+**Where:** Activity page.
+
+| # | Step | Expected result | ✓ |
+|---|---|---|---|
+| 18.1 | Attempt a login with a wrong password, then check Activity | The **failed** attempt is recorded, with the email tried | ☐ |
+| 18.2 | Change a product's selling price, then check Activity | Entry shows the **old and new** value, who changed it, and when | ☐ |
+| 18.3 | Record a payment, cancel an invoice, reclassify stock | Each appears as its own entry | ☐ |
+| 18.4 | Filter by date and by kind | Filters narrow the list correctly | ☐ |
+| 18.5 | Search the log for any password | Nothing — passwords are never recorded | ☐ |
+| 18.6 | Attempt an action that fails (e.g. oversell) | **No** log entry is written — the record and the event succeed or fail together | ☐ |
 
 > Ordinary stock movements are **deliberately not** duplicated here: the stock ledger is already permanent and unedited, so it is its own audit trail.
+
+---
+
+## 19. Purchase automation
+
+**Where:** Reports → Reorder suggestions.
+
+**Setup:** put at least two products below their reorder level, each with a **preferred supplier** set, plus one below level with **no** supplier.
+
+| # | Step | Expected result | ✓ |
+|---|---|---|---|
+| 19.1 | Open Reports → Reorder suggestions | Short shelves are listed **per location**, not merged across the company | ☐ |
+| 19.2 | Press **Create draft orders** | One order per supplier — not one per product | ☐ |
+| 19.3 | Open a generated order | Status is **DRAFT**. It has not been sent anywhere | ☐ |
+| 19.4 | Check the product with no preferred supplier | Listed under **Not ordered**, with the reason | ☐ |
+| 19.5 | Check a product short at two locations | Appears as **one line**, quantities added together | ☐ |
+| 19.6 | Move a generated order to ORDERED yourself | Works normally — this is the only way an order reaches a supplier | ☐ |
+
+> **Key principle: the system never places an order.** It cannot — the generator has no way to create anything but a draft. A human always decides what is actually bought. It also refuses to guess a supplier: choosing one for you would be inventing a commercial relationship.
+
+---
+
+## 20. Advanced analytics
+
+**Where:** Analytics page. Default range is the last 3 months.
+
+| # | Step | Expected result | ✓ |
+|---|---|---|---|
+| 20.1 | Open Analytics | Turnover, dead stock, ABC and trends all load | ☐ |
+| 20.2 | Read the turnover card | Shows opening → closing stock value so the ratio can be checked by hand | ☐ |
+| 20.3 | Look for a "—" instead of a number | Wherever a figure is missing, a **reason** is printed beside it | ☐ |
+| 20.4 | Check dead stock | Products never sold are marked **NEVER SOLD**, separately from merely slow ones | ☐ |
+| 20.5 | Check the dead-stock total | Shows money tied up, sorted with the most expensive first | ☐ |
+| 20.6 | Check ABC with fewer than 10 selling products | Refuses to classify, and says why — products are still ranked | ☐ |
+| 20.7 | Switch ABC to **By quantity** | Ranking re-sorts by units instead of revenue | ☐ |
+| 20.8 | Check the trend badges | A small change reads **Steady**, not a percentage; a short range reads **Unclear** | ☐ |
+| 20.9 | Change the date range and Apply | Turnover, ABC and trends update. Dead stock does **not** — it ignores the range by design | ☐ |
+
+> **Key principle: every figure may answer "I don't know".** A turnover ratio from two weeks of data, or an ABC classification of four products, looks exactly like a real measurement and is not one. A blank prompts a question; a wrong number ends one.
+
+---
+
+## 21. Demand forecasting
+
+**Where:** Analytics → Demand forecast (top of the page).
+
+| # | Step | Expected result | ✓ |
+|---|---|---|---|
+| 21.1 | Open the forecast | The advisory notice appears above the table, before any number | ☐ |
+| 21.2 | Check a product with little sales history | No forecast; the reason says how much history exists | ☐ |
+| 21.3 | Check the headline counts | "Not enough history" is shown as a headline figure, not hidden in the rows | ☐ |
+| 21.4 | Check a product with steady sales | Shows predicted demand, a per-day rate, and days of cover | ☐ |
+| 21.5 | Check **Consider ordering** where stock is plentiful | Reads **enough** — never a negative number | ☐ |
+| 21.6 | Check the **Basis** column | States how many days the product sold on, out of how many | ☐ |
+| 21.7 | Reload the page | Figures recompute; nothing was saved to be acted on later | ☐ |
+| 21.8 | Look for any button that acts on a forecast | **There is none.** To buy anything you raise a purchase order yourself | ☐ |
+
+> **Key principle: a forecast is the only number here describing something that has not happened**, and it arrives looking exactly like a measurement. It writes nothing, orders nothing, and changes no stock. Suggested quantities also do **not** allow for supplier lead time — the system does not record it, and the notice says so.
+
+---
+
+## 22. Point of sale (the till)
+
+**Where:** Till (POS).
+
+| # | Step | Expected result | ✓ |
+|---|---|---|---|
+| 22.1 | Open the till and add a product by name | Appears in the basket at the **catalogue** price | ☐ |
+| 22.2 | Scan the same item twice (or add it twice) | One line with quantity 2 — not two lines | ☐ |
+| 22.3 | Take payment with **Cash tendered** left blank | Sale completes; invoice marked PAID | ☐ |
+| 22.4 | **Check Stock for that product** | Down by exactly the quantity sold | ☐ |
+| 22.5 | Open the invoice from the receipt | An ordinary invoice with an `INV-` number, in the same number sequence as typed invoices | ☐ |
+| 22.6 | Ring a sale with cash **above** the total | Receipt shows **Change** to hand back. The payment recorded equals the bill, not the cash tendered | ☐ |
+| 22.7 | Ring a sale with cash **below** the total | Recorded as a part payment; balance still owing | ☐ |
+| 22.8 | Tick **Put on account** and complete | Stock still moves; invoice is ISSUED and unpaid, and appears in outstanding balances | ☐ |
+| 22.9 | Try to sell more than you hold | Refused — exactly as an invoice would be | ☐ |
+| 22.10 | Tick **GST invoice** with a product that has no rate | Warning appears **immediately**, naming the product; the button is disabled | ☐ |
+| 22.11 | Tick **GST invoice** with rated products | Sale completes; the invoice shows CGST/SGST or IGST correctly | ☐ |
+| 22.12 | Check Reports → profitability after a till sale | The sale appears in revenue **and** cost of goods sold | ☐ |
+
+> **Key principle: the till is not a second system.** It creates an ordinary invoice, issues it through the ordinary path, and records an ordinary payment. That is why 22.4, 22.5, 22.9 and 22.12 pass without anything being written twice — and why every rule added to invoicing in future applies to the counter automatically.
 
 ---
 
@@ -309,11 +406,14 @@ Backend-complete; there is no way to raise a GST invoice from the interface. Rec
 
 These are recorded deliberately and are not defects to be raised:
 
-1. **No screens for GST, sessions, or the audit log** (sections 16–18). The functionality exists and is tested; only the interface is outstanding.
+1. **The till reports unsellable stock at the payment moment, not at scan time.** A batch-tracked product whose batch pool is empty fails when you press *Take payment*, after the basket is built. The GST equivalent was moved earlier (22.10); this one needs a per-location stock lookup for every basket line, and is outstanding.
 2. **No screens yet** for Goods Receipt creation outside a purchase order, or for supplier return editing after sending.
-3. **Automated tests do not cover database constraints.** The test database is built by schema push rather than by running migrations, so the **38** integrity constraints are active in production but not exercised by the test suite.
-4. **Expired stock is reported, not written off automatically.** Nothing changes condition on a schedule — a person decides. This is intentional: stock quietly reclassifying itself overnight would be harder to explain than to prevent.
-5. **Access tokens remain valid for up to 15 minutes after a session is revoked.** Checking every request against the database would make it a single point of failure for the whole system; the short lifetime is the trade.
+3. **Expired stock is reported, not written off automatically.** Nothing changes condition on a schedule — a person decides. This is intentional: stock quietly reclassifying itself overnight would be harder to explain than to prevent.
+4. **Access tokens remain valid for up to 15 minutes after a session is revoked.** Checking every request against the database would make it a single point of failure for the whole system; the short lifetime is the trade.
+5. **Forecasts ignore supplier lead time.** The system does not record how long a supplier takes, so a suggested quantity covers the forecast horizon only. Order earlier than it suggests if a supplier is slow.
+6. **Historical stock is valued at today's average cost** in the turnover figure. Adequate for a ratio; it is not a basis for a balance sheet, and the report says so on screen.
+7. **The point of sale is online-only.** There is no offline queue. A sale that cannot reach the server has not happened — and the operator is told immediately rather than discovering at closing time that a queue never drained.
+8. **Accounting integration is not implemented** and was explicitly out of scope.
 
 ---
 
