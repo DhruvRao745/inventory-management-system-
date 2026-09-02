@@ -3,7 +3,7 @@
  * issuing — writes SALE movements (negative quantity) into the ledger, with
  * an oversell guard so you can't invoice more than you hold at the location.
  */
-import { Prisma } from "@prisma/client";
+import { Prisma, type InvoiceSource } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error.js";
 import {
@@ -197,16 +197,60 @@ async function stampGst(
 
   const products = await tx.product.findMany({
     where: { id: { in: inv.lines.map((l) => l.productId) }, companyId },
-    select: { id: true, gstRate: true, hsnCode: true },
+    select: { id: true, gstRate: true, hsnCode: true, name: true, sku: true },
   });
   const productById = new Map(products.map((p) => [p.id, p]));
+
+  /**
+   * A MISSING rate is not a rate of zero.
+   *
+   * `Product.gstRate` is nullable, and the two states mean different things:
+   *
+   *   0     → these goods are zero-rated. Nil-rated and exempt supplies are
+   *           real, and 0% is a legitimate, deliberate answer.
+   *   null  → nobody has decided yet.
+   *
+   * Collapsing null to zero (`rate ?? 0`) turns the second into the first, and
+   * the invoice then PRINTS "CGST @ 0%" — which on a tax document is a
+   * positive claim that the goods are zero-rated, not a note that a field was
+   * left blank. Nothing downstream can tell the difference afterwards, because
+   * by then the line carries a stamped 0 like any other rate.
+   *
+   * Raising a GST invoice is a deliberate act. Answering it with a silent zero
+   * is the system guessing on the user's behalf about tax, which is the one
+   * subject where a confident wrong answer is worst.
+   *
+   * Checked HERE rather than at issue time because this is the last moment the
+   * null still exists — the stamping below is what destroys it.
+   */
+  const unrated = inv.lines
+    .filter((l) => {
+      // A per-line override wins and may legitimately be 0.
+      if (l.gstRate !== null) return false;
+      return (productById.get(l.productId)?.gstRate ?? null) === null;
+    })
+    .map((l) => {
+      const p = productById.get(l.productId);
+      return p ? `${p.name} (${p.sku})` : "an unknown product";
+    });
+
+  if (unrated.length > 0) {
+    throw new AppError(
+      400,
+      `Set a GST rate on ${[...new Set(unrated)].join(", ")} before raising a ` +
+        `GST invoice for it. If the goods really are nil-rated, enter 0 — ` +
+        `leaving it blank isn't the same thing, and the invoice would print ` +
+        `"0%" as if you had decided that.`
+    );
+  }
 
   const breakup = computeInvoiceGst({
     lines: inv.lines.map((l) => ({
       quantity: l.quantity,
       unitPrice: l.unitPrice,
       // A rate already stamped on the line wins — that's the per-line
-      // override. Otherwise take the product's current rate.
+      // override. Otherwise take the product's current rate. Neither can be
+      // null by this point; the guard above refused that case.
       gstRate: l.gstRate ?? productById.get(l.productId)?.gstRate ?? null,
     })),
     discount: inv.discount,
@@ -395,7 +439,14 @@ function validateLineQuantities(
 export async function createInvoice(
   companyId: string,
   createdById: string,
-  input: CreateInvoiceInput
+  input: CreateInvoiceInput,
+  /**
+   * Which channel raised this (P3-4). A PARAMETER, not a request field, for
+   * the same reason `generatedFrom` is on createPO: the channel is a fact
+   * about how the server was called, and a client that could claim it could
+   * make counter sales appear in the till's takings.
+   */
+  source: InvoiceSource = "MANUAL"
 ) {
   return prisma.$transaction(async (tx) => {
     await assertLocation(tx, companyId, input.locationId);
@@ -477,6 +528,7 @@ export async function createInvoice(
         discount: input.discount ?? null,
         taxMode: input.useGst ? "GST" : "FLAT",
         placeOfSupply,
+        source,
         locationId: input.locationId,
         lines: {
           create: input.lines.map((l, i) => ({

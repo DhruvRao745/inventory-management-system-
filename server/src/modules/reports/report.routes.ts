@@ -19,6 +19,13 @@ import { grandTotal } from "../invoices/inv.service.js";
 import { invoiceTotalDecimal } from "../../lib/money.js";
 import { grossProfit } from "../../lib/costing.js";
 import { reorderReport } from "../reorder/reorder.service.js";
+import {
+  inventoryTurnover,
+  abcAnalysis,
+  trendOf,
+  classifyStaleness,
+} from "../../lib/analytics.js";
+import { forecastDemand, suggestQuantity } from "../../lib/forecast.js";
 
 // The client sends exact universal instants (ISO format, e.g.
 // "2026-07-08T18:30:00.000Z") — IT knows the user's timezone; we don't.
@@ -1356,6 +1363,543 @@ reportsRouter.get(
           : null,
       })),
       topProducts,
+    });
+  })
+);
+
+/* ==================================================================== *
+ * P3-2 — advanced analytics                                             *
+ * ==================================================================== */
+
+/**
+ * Stock value at a point in time, reconstructed from the ledger.
+ *
+ * The ledger is append-only, so the quantity held on any past date is exactly
+ * the sum of every movement up to it — a reconstruction, not an estimate.
+ *
+ * The one approximation, stated plainly: quantities are historical but they
+ * are valued at TODAY'S average cost. Valuing them at the average in force on
+ * that date would need a running average per product per day, which the schema
+ * doesn't keep. For turnover — a ratio, over a period, used to spot a
+ * direction — that is an acceptable simplification. It would not be acceptable
+ * for a balance sheet, and this figure should never be used as one.
+ */
+async function stockValueAsOf(
+  companyId: string,
+  asOf: Date
+): Promise<{ value: Prisma.Decimal; units: Prisma.Decimal }> {
+  const grouped = await prisma.stockMovement.groupBy({
+    by: ["productId"],
+    where: { companyId, createdAt: { lte: asOf } },
+    _sum: { quantity: true },
+  });
+  const zero = new Prisma.Decimal(0);
+  if (grouped.length === 0) return { value: zero, units: zero };
+
+  const products = await prisma.product.findMany({
+    where: { id: { in: grouped.map((g) => g.productId) }, companyId },
+    select: { id: true, avgCost: true },
+  });
+  const costById = new Map(products.map((p) => [p.id, p.avgCost]));
+
+  // UNITS are returned alongside value because a value of zero has two causes:
+  // an empty warehouse, or a full one whose contents have no recorded cost.
+  // Legacy stock received before costing shipped is exactly the second, and
+  // calling it "no stock held" would be a plain falsehood on screen.
+  return grouped.reduce(
+    (acc, g) => {
+      const qty = g._sum.quantity ?? zero;
+      if (qty.lessThanOrEqualTo(0)) return acc; // negative stock isn't value
+      const cost = costById.get(g.productId) ?? zero;
+      return {
+        value: acc.value.plus(qty.times(cost)),
+        units: acc.units.plus(qty),
+      };
+    },
+    { value: zero, units: zero }
+  );
+}
+
+/**
+ * GET /api/reports/turnover?from&to
+ *   How many times stock was sold and replaced. "Am I holding too much?"
+ */
+reportsRouter.get(
+  "/turnover",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const { from, to } = dateRangeSchema.parse(req.query);
+    const companyId = req.user!.companyId;
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+    if (fromDate > toDate) throw new AppError(400, "'from' is after 'to'");
+
+    const [sales, opening, closing] = await Promise.all([
+      // COGS from the cost stamped on each sale when it happened — not
+      // today's average. This is what keeps a past period's cost fixed (P1-3).
+      prisma.stockMovement.findMany({
+        where: {
+          companyId,
+          type: "SALE",
+          createdAt: { gte: fromDate, lte: toDate },
+        },
+        select: { quantity: true, costAtTime: true },
+      }),
+      stockValueAsOf(companyId, fromDate),
+      stockValueAsOf(companyId, toDate),
+    ]);
+
+    const cogs = sales.reduce(
+      (s, m) => s.plus(m.quantity.abs().times(m.costAtTime ?? new Prisma.Decimal(0))),
+      new Prisma.Decimal(0)
+    );
+
+    // Sales whose cost was never recorded. COGS understates by exactly these,
+    // and without counting them a zero COGS is indistinguishable from a period
+    // with no sales at all.
+    const salesMissingCost = sales.filter(
+      (m) => m.costAtTime === null || m.costAtTime.isZero()
+    ).length;
+
+    const periodDays = Math.max(
+      1,
+      Math.round((toDate.getTime() - fromDate.getTime()) / 86_400_000)
+    );
+
+    res.json({
+      period: { from: fromDate, to: toDate, days: periodDays },
+      openingValue: Number(opening.value.toDecimalPlaces(2)),
+      closingValue: Number(closing.value.toDecimalPlaces(2)),
+      salesCount: sales.length,
+      ...inventoryTurnover({
+        cogs,
+        openingValue: opening.value,
+        closingValue: closing.value,
+        periodDays,
+        salesCount: sales.length,
+        salesMissingCost,
+        // Whether anything was on a shelf, regardless of what it was worth.
+        heldStock: opening.units.greaterThan(0) || closing.units.greaterThan(0),
+      }),
+      note:
+        "Historical quantities are valued at today's average cost — good " +
+        "enough for a ratio, not a basis for a balance sheet.",
+    });
+  })
+);
+
+/**
+ * GET /api/reports/dead-stock?slowAfterDays&staleAfterDays
+ *   What is sitting there not selling, and what it is costing.
+ *
+ * DEAD (never sold at all) is separated from merely slow because the remedy
+ * differs — and because dead stock never appears in any sales report by
+ * definition, so it is the easiest kind to keep paying for without noticing.
+ */
+reportsRouter.get(
+  "/dead-stock",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const q = z
+      .object({
+        slowAfterDays: z.coerce.number().int().min(1).default(60),
+        staleAfterDays: z.coerce.number().int().min(1).default(120),
+      })
+      .parse(req.query);
+    const companyId = req.user!.companyId;
+    const now = Date.now();
+
+    const [products, onHandRows, lastSales] = await Promise.all([
+      prisma.product.findMany({
+        where: { companyId, isActive: true },
+        select: { id: true, sku: true, name: true, unit: true, avgCost: true },
+      }),
+      prisma.stockMovement.groupBy({
+        by: ["productId"],
+        where: { companyId },
+        _sum: { quantity: true },
+      }),
+      // Most recent sale per product. groupBy _max gives it in one query
+      // rather than one query per product.
+      prisma.stockMovement.groupBy({
+        by: ["productId"],
+        where: { companyId, type: "SALE" },
+        _max: { createdAt: true },
+      }),
+    ]);
+
+    const onHandById = new Map(
+      onHandRows.map((r) => [r.productId, r._sum.quantity ?? new Prisma.Decimal(0)])
+    );
+    const lastSaleById = new Map(
+      lastSales.map((r) => [r.productId, r._max.createdAt])
+    );
+
+    const rows = products
+      .map((p) => {
+        const onHand = onHandById.get(p.id) ?? new Prisma.Decimal(0);
+        const lastSale = lastSaleById.get(p.id) ?? null;
+        const daysSinceLastSale = lastSale
+          ? Math.floor((now - lastSale.getTime()) / 86_400_000)
+          : null;
+
+        const staleness = classifyStaleness({
+          onHand: Number(onHand),
+          daysSinceLastSale,
+          slowAfterDays: q.slowAfterDays,
+          staleAfterDays: q.staleAfterDays,
+        });
+        if (!staleness || staleness === "moving") return null;
+
+        return {
+          productId: p.id,
+          sku: p.sku,
+          name: p.name,
+          unit: p.unit,
+          onHand: Number(onHand),
+          lastSaleAt: lastSale,
+          daysSinceLastSale,
+          staleness,
+          // The number that makes this actionable: money asleep on a shelf.
+          tiedUpValue: Number(onHand.times(p.avgCost).toDecimalPlaces(2)),
+        };
+      })
+      .filter((r) => r !== null)
+      // Most money stuck first — not oldest, because a cheap item gathering
+      // dust matters less than an expensive one.
+      .sort((a, b) => b!.tiedUpValue - a!.tiedUpValue);
+
+    res.json({
+      thresholds: q,
+      rows,
+      totals: {
+        products: rows.length,
+        dead: rows.filter((r) => r!.staleness === "dead").length,
+        tiedUpValue:
+          Math.round(rows.reduce((s, r) => s + r!.tiedUpValue, 0) * 100) / 100,
+        // How many products are held at all. Without this, an empty result is
+        // ambiguous — "everything you hold is selling" and "you hold nothing"
+        // both produce zero rows, and only one of them is good news.
+        productsHeld: products.filter((p) =>
+          (onHandById.get(p.id) ?? new Prisma.Decimal(0)).greaterThan(0)
+        ).length,
+      },
+    });
+  })
+);
+
+/**
+ * GET /api/reports/abc?from&to&basis=revenue|quantity
+ *   Which products carry the value, so attention goes where it pays.
+ */
+reportsRouter.get(
+  "/abc",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const q = dateRangeSchema
+      .extend({ basis: z.enum(["revenue", "quantity"]).default("revenue") })
+      .parse(req.query);
+    const companyId = req.user!.companyId;
+    const fromDate = new Date(q.from);
+    const toDate = new Date(q.to);
+    if (fromDate > toDate) throw new AppError(400, "'from' is after 'to'");
+
+    // Revenue comes from invoice LINES, not stock movements: a movement knows
+    // what stock cost, not what it sold for.
+    const lines = await prisma.invoiceLine.findMany({
+      where: {
+        invoice: {
+          companyId,
+          status: { in: ["ISSUED", "PAID"] },
+          issuedAt: { gte: fromDate, lte: toDate },
+        },
+      },
+      select: {
+        productId: true,
+        quantity: true,
+        unitPrice: true,
+        product: { select: { sku: true, name: true } },
+      },
+    });
+
+    const byProduct = new Map<
+      string,
+      { label: string; revenue: Prisma.Decimal; quantity: Prisma.Decimal }
+    >();
+
+    for (const l of lines) {
+      const row = byProduct.get(l.productId) ?? {
+        label: `${l.product.name} (${l.product.sku})`,
+        revenue: new Prisma.Decimal(0),
+        quantity: new Prisma.Decimal(0),
+      };
+      row.revenue = row.revenue.plus(l.unitPrice.times(l.quantity));
+      row.quantity = row.quantity.plus(l.quantity);
+      byProduct.set(l.productId, row);
+    }
+
+    const result = abcAnalysis(
+      [...byProduct.entries()].map(([id, r]) => ({
+        id,
+        label: r.label,
+        value: Number(
+          (q.basis === "revenue" ? r.revenue : r.quantity).toDecimalPlaces(2)
+        ),
+      }))
+    );
+
+    res.json({ basis: q.basis, ...result });
+  })
+);
+
+/**
+ * GET /api/reports/trends?from&to&tzOffset
+ *   Where sales and demand are heading — direction, not prediction.
+ *
+ * Deliberately separate from forecasting. This describes what HAS happened;
+ * a forecast claims what will. Conflating them is how a chart becomes a promise.
+ */
+reportsRouter.get(
+  "/trends",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const { from, to, tzOffset } = salesSeriesSchema.parse(req.query);
+    const companyId = req.user!.companyId;
+    const fromDate = new Date(from);
+    const toDate = new Date(to);
+    if (fromDate > toDate) throw new AppError(400, "'from' is after 'to'");
+
+    const [sales, invoices] = await Promise.all([
+      prisma.stockMovement.findMany({
+        where: {
+          companyId,
+          type: "SALE",
+          createdAt: { gte: fromDate, lte: toDate },
+        },
+        select: { createdAt: true, quantity: true },
+      }),
+      prisma.invoice.findMany({
+        where: {
+          companyId,
+          status: { in: ["ISSUED", "PAID"] },
+          issuedAt: { gte: fromDate, lte: toDate },
+        },
+        include: { lines: true },
+      }),
+    ]);
+
+    // Units per day, in the USER's timezone — a sale at 9pm in Mumbai belongs
+    // to that day, not to tomorrow in UTC.
+    const unitsByDay = new Map<string, number>();
+    for (const s of sales) {
+      const key = localDayKey(s.createdAt, tzOffset);
+      unitsByDay.set(key, (unitsByDay.get(key) ?? 0) + Number(s.quantity.abs()));
+    }
+
+    const revenueByDay = new Map<string, number>();
+    for (const inv of invoices) {
+      if (!inv.issuedAt) continue;
+      const key = localDayKey(inv.issuedAt, tzOffset);
+      revenueByDay.set(
+        key,
+        (revenueByDay.get(key) ?? 0) + Number(invoiceTotalDecimal(inv))
+      );
+    }
+
+    // Every day in the range, including the empty ones — a gap is a real zero,
+    // and dropping it would flatter the trend by hiding the days nothing sold.
+    const days: string[] = [];
+    for (
+      let t = new Date(fromDate);
+      t <= toDate;
+      t = new Date(t.getTime() + 86_400_000)
+    ) {
+      days.push(localDayKey(t, tzOffset));
+    }
+
+    const unitSeries = days.map((d) => unitsByDay.get(d) ?? 0);
+    const revenueSeries = days.map((d) => revenueByDay.get(d) ?? 0);
+
+    res.json({
+      period: { from: fromDate, to: toDate, days: days.length },
+      series: days.map((date, i) => ({
+        date,
+        units: unitSeries[i]!,
+        revenue: Math.round(revenueSeries[i]! * 100) / 100,
+      })),
+      demandTrend: trendOf(unitSeries),
+      revenueTrend: trendOf(revenueSeries),
+    });
+  })
+);
+
+/* ====================================================================== *
+ * P3-3 — demand forecasting                                              *
+ *                                                                        *
+ * ADVISORY ONLY, and structurally so: GET, no service call that writes,   *
+ * no transaction. The forecast produces a number on a screen and nothing   *
+ * else. Acting on it means going to Purchases and raising an order by      *
+ * hand, exactly as before — the existing flow is untouched.                *
+ *                                                                        *
+ * Computed on read, never stored. A stored forecast is a forecast that     *
+ * goes stale silently: it would keep displaying yesterday's opinion of     *
+ * next month long after the sales that produced it stopped being typical,  *
+ * and nothing on screen would say so.                                     *
+ * ====================================================================== */
+
+const forecastSchema = z.object({
+  /** How far ahead. 30 by default, per the spec. */
+  horizonDays: z.coerce.number().int().min(7).max(90).default(30),
+  /** How much history to learn from. */
+  historyDays: z.coerce.number().int().min(21).max(365).default(90),
+  tzOffset: z.coerce.number().int().min(-840).max(840).default(0),
+  locationId: z.string().optional(),
+});
+
+/**
+ * GET /api/reports/forecast?horizonDays&historyDays&tzOffset&locationId
+ *   "What will I probably sell over the next 30 days, and what should I
+ *    consider ordering?"
+ */
+reportsRouter.get(
+  "/forecast",
+  asyncHandler(async (req: AuthRequest, res) => {
+    const q = forecastSchema.parse(req.query);
+    const companyId = req.user!.companyId;
+
+    const now = new Date();
+    const historyStart = new Date(now.getTime() - q.historyDays * 86_400_000);
+
+    if (q.locationId) {
+      const loc = await prisma.location.findFirst({
+        where: { id: q.locationId, companyId },
+        select: { id: true },
+      });
+      if (!loc) throw new AppError(404, "Location not found");
+    }
+
+    const [products, sales, stockRows] = await Promise.all([
+      prisma.product.findMany({
+        where: { companyId, isActive: true },
+        select: {
+          id: true,
+          sku: true,
+          name: true,
+          unit: true,
+          lowStockThreshold: true,
+          preferredSupplier: { select: { id: true, name: true } },
+        },
+      }),
+      prisma.stockMovement.findMany({
+        where: {
+          companyId,
+          type: "SALE",
+          createdAt: { gte: historyStart, lte: now },
+          ...(q.locationId ? { locationId: q.locationId } : {}),
+        },
+        select: { productId: true, createdAt: true, quantity: true },
+      }),
+      // What is actually sellable. DAMAGED, QUARANTINE and EXPIRED units are
+      // still ours and still in the valuation, but they cannot fill an order —
+      // counting them here would tell someone not to reorder stock they cannot
+      // sell (P2-2).
+      prisma.stockMovement.groupBy({
+        by: ["productId"],
+        where: {
+          companyId,
+          status: "AVAILABLE",
+          ...(q.locationId ? { locationId: q.locationId } : {}),
+        },
+        _sum: { quantity: true },
+      }),
+    ]);
+
+    const availableById = new Map(
+      stockRows.map((r) => [r.productId, Number(r._sum.quantity ?? 0)])
+    );
+
+    // Every day in the history window, so a product that stopped selling shows
+    // its zeroes rather than vanishing from its own series.
+    const days: string[] = [];
+    for (
+      let t = new Date(historyStart);
+      t <= now;
+      t = new Date(t.getTime() + 86_400_000)
+    ) {
+      days.push(localDayKey(t, q.tzOffset));
+    }
+
+    const soldByProductDay = new Map<string, Map<string, number>>();
+    for (const s of sales) {
+      const day = localDayKey(s.createdAt, q.tzOffset);
+      const perDay = soldByProductDay.get(s.productId) ?? new Map();
+      perDay.set(day, (perDay.get(day) ?? 0) + Number(s.quantity.abs()));
+      soldByProductDay.set(s.productId, perDay);
+    }
+
+    const rows = products.map((p) => {
+      const perDay = soldByProductDay.get(p.id);
+      const daily = days.map((d) => perDay?.get(d) ?? 0);
+      const available = availableById.get(p.id) ?? 0;
+
+      const forecast = forecastDemand({ daily, horizonDays: q.horizonDays });
+      const suggestion = suggestQuantity({
+        predictedDemand: forecast.predictedDemand,
+        available,
+        confidence: forecast.confidence,
+      });
+
+      return {
+        productId: p.id,
+        sku: p.sku,
+        name: p.name,
+        unit: p.unit,
+        available,
+        preferredSupplier: p.preferredSupplier,
+        forecast,
+        suggestion,
+        /**
+         * Days until the CURRENT stock runs out at the forecast rate.
+         *
+         * Usually the most actionable figure on the row: "40 units, 12 days
+         * left" prompts a decision in a way that "predicted demand 98" does
+         * not. Null when there's no rate, and null rather than Infinity when
+         * nothing is selling — "runs out never" is not a number of days.
+         */
+        daysOfCover:
+          forecast.perDay && forecast.perDay > 0
+            ? Math.floor(available / forecast.perDay)
+            : null,
+      };
+    });
+
+    // Most urgent first: anything running out soonest, then anything with a
+    // suggested order, then the rest. A product with no forecast sorts last —
+    // it is not a recommendation and should not sit above one.
+    rows.sort((a, b) => {
+      const ac = a.daysOfCover ?? Number.MAX_SAFE_INTEGER;
+      const bc = b.daysOfCover ?? Number.MAX_SAFE_INTEGER;
+      if (ac !== bc) return ac - bc;
+      return (b.suggestion.suggestedQty ?? -1) - (a.suggestion.suggestedQty ?? -1);
+    });
+
+    res.json({
+      horizonDays: q.horizonDays,
+      historyDays: q.historyDays,
+      generatedAt: now,
+      rows,
+      totals: {
+        products: rows.length,
+        forecast: rows.filter((r) => r.forecast.predictedDemand !== null).length,
+        noForecast: rows.filter((r) => r.forecast.predictedDemand === null)
+          .length,
+        toOrder: rows.filter((r) => (r.suggestion.suggestedQty ?? 0) > 0).length,
+      },
+      // Stated in the payload, not just the UI, so anything else that consumes
+      // this endpoint inherits the caveat rather than having to know it.
+      caveats: [
+        "Advisory only. Nothing here changes stock or creates an order.",
+        "Suggested quantities do not allow for supplier lead time — the " +
+          "system does not record it. If a supplier takes three weeks, order " +
+          "earlier than this suggests.",
+        "Availability excludes damaged, quarantined and expired stock.",
+      ],
     });
   })
 );

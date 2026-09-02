@@ -92,6 +92,18 @@ const icons = {
       <path d="M12 7v5l3 2" />
     </IconBase>
   ),
+  analytics: (
+    <IconBase>
+      <path d="M3 3v18h18" />
+      <path d="M7 15l4-5 3 3 5-7" />
+    </IconBase>
+  ),
+  pos: (
+    <IconBase>
+      <rect x="2" y="6" width="20" height="12" rx="2" />
+      <path d="M2 11h20M6 15h3" />
+    </IconBase>
+  ),
   invoices: (
     <IconBase>
       <path d="M5 3h14v18l-3-2-2 2-2-2-2 2-2-2-3 2z" />
@@ -168,10 +180,12 @@ const navItems = [
   { to: "/purchase-orders", label: "Purchases", icon: icons.purchases, color: "#6366f1" },
   { to: "/receiving", label: "Receiving", icon: icons.receiving, color: "#0ea5e9" },
   { to: "/stock-counts", label: "Stock counts", icon: icons.counts, color: "#f97316" },
+  { to: "/pos", label: "Till (POS)", icon: icons.pos, color: "#84cc16" },
   { to: "/invoices", label: "Invoices", icon: icons.invoices, color: "#eab308" },
   { to: "/returns", label: "Returns", icon: icons.returns, color: "#fb7185" },
   { to: "/customers", label: "Customers", icon: icons.customers, color: "#f43f5e" },
   { to: "/reports", label: "Reports", icon: icons.reports, color: "#10b981" },
+  { to: "/analytics", label: "Analytics", icon: icons.analytics, color: "#22c55e" },
   { to: "/audit", label: "Activity", icon: icons.activity, color: "#64748b" },
   { to: "/settings", label: "Settings", icon: icons.settings, color: "#ec4899" },
 ];

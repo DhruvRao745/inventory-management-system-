@@ -5,11 +5,13 @@
  *   GET    /api/reorder/settings   → per-location rules
  *   PUT    /api/reorder/settings   → set the rule for one shelf (upsert)
  *   DELETE /api/reorder/settings/:id → revert that shelf to the product default
+ *   POST   /api/reorder/generate-pos → DRAFT purchase orders from the report (P3-1)
  *
  * PUT rather than POST for the upsert: there is exactly one rule per
  * (product, location), so "set the rule for this shelf" is idempotent.
  */
 import { Router } from "express";
+import { z } from "zod";
 import {
   upsertSettingSchema,
   listSettingsQuerySchema,
@@ -61,5 +63,33 @@ reorderRouter.get(
   asyncHandler(async (req: AuthRequest, res) => {
     const q = reorderQuerySchema.parse(req.query);
     res.json(await service.reorderReport(req.user!.companyId, q));
+  })
+);
+
+/**
+ * POST /api/reorder/generate-pos — draft purchase orders from the report.
+ *
+ * Restricted to the roles that can already create purchase orders. It creates
+ * DRAFTS only; nothing here can place an order with a supplier, and the
+ * generator has no way to set any status but DRAFT.
+ */
+reorderRouter.post(
+  "/generate-pos",
+  canEdit,
+  asyncHandler(async (req: AuthRequest, res) => {
+    const input = z
+      .object({
+        locationId: z.string().optional(),
+        /** Limit to specific products; omit to take every recommendation. */
+        productIds: z.array(z.string()).optional(),
+      })
+      .parse(req.body ?? {});
+
+    const result = await service.generateDraftPOs(
+      req.user!.companyId,
+      req.user!.userId,
+      input
+    );
+    res.status(201).json(result);
   })
 );

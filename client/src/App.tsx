@@ -24,6 +24,8 @@ import { PurchaseOrdersPage } from "./pages/PurchaseOrdersPage";
 import { PurchaseOrderDetailPage } from "./pages/PurchaseOrderDetailPage";
 import { SettingsPage } from "./pages/SettingsPage";
 import { ReportsPage } from "./pages/ReportsPage";
+import { AnalyticsPage } from "./pages/AnalyticsPage";
+import { PosPage } from "./pages/PosPage";
 import { AuditPage } from "./pages/AuditPage";
 import { InvoicesPage } from "./pages/InvoicesPage";
 import { ReturnsPage } from "./pages/ReturnsPage";
@@ -65,6 +67,7 @@ export default function App() {
               path="/purchase-orders/:id"
               element={<PurchaseOrderDetailPage />}
             />
+            <Route path="/pos" element={<PosPage />} />
             <Route path="/invoices" element={<InvoicesPage />} />
             <Route path="/returns" element={<ReturnsPage />} />
             <Route path="/batches" element={<BatchesPage />} />
@@ -75,6 +78,7 @@ export default function App() {
             <Route path="/customers" element={<CustomersPage />} />
             <Route path="/customers/:id" element={<CustomerDetailPage />} />
             <Route path="/reports" element={<ReportsPage />} />
+            <Route path="/analytics" element={<AnalyticsPage />} />
             <Route path="/audit" element={<AuditPage />} />
             <Route path="/settings" element={<SettingsPage />} />
           </Route>

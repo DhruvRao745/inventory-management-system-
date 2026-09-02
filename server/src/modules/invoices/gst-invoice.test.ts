@@ -298,3 +298,124 @@ describe("GST invoices — legacy invoices are frozen", () => {
     expect(full.paymentStatus).toBe("PAID");
   });
 });
+
+/**
+ * A missing rate is not a rate of zero.
+ *
+ * `Product.gstRate` is nullable, and null vs 0 are different facts:
+ *
+ *   0    → nil-rated or exempt goods. A real, deliberate answer.
+ *   null → nobody has decided yet.
+ *
+ * Collapsing them makes the invoice print "CGST @ 0%", which on a tax document
+ * is a claim about the goods rather than a note about a blank field. Once the
+ * line is stamped, nothing downstream can tell which happened.
+ */
+describe("GST — a missing rate is not zero", () => {
+  beforeEach(resetDb);
+
+  /** A GST company whose product has NO rate set. */
+  async function unratedShop() {
+    const base = await createTestCompany();
+    await prisma.company.update({
+      where: { id: base.company.id },
+      data: { stateCode: "27" },
+    });
+    await prisma.product.update({
+      where: { id: base.product.id },
+      data: { gstRate: null },
+    });
+    await stockService.createMovement(base.company.id, base.user.id, {
+      productId: base.product.id,
+      locationId: base.location.id,
+      type: "PURCHASE",
+      quantity: 100,
+      unitCost: 10,
+    } as Parameters<typeof stockService.createMovement>[2]);
+
+    const raise = (extra: Record<string, unknown> = {}) =>
+      invService.createInvoice(base.company.id, base.user.id, {
+        customerName: "Walk-in",
+        locationId: base.location.id,
+        useGst: true,
+        lines: [{ productId: base.product.id, quantity: 2, unitPrice: 110 }],
+        ...extra,
+      } as Parameters<typeof invService.createInvoice>[2]);
+
+    return { ...base, raise };
+  }
+
+  it("refuses a GST invoice for a product with no rate set", async () => {
+    const shop = await unratedShop();
+    const err = await expectAppError(shop.raise(), 400);
+    expect(err.message).toMatch(/GST rate/i);
+  });
+
+  it("names the product, so the gap can be closed", async () => {
+    // "Set a GST rate somewhere" is not an actionable error at a counter.
+    const shop = await unratedShop();
+    const err = await expectAppError(shop.raise(), 400);
+    expect(err.message).toContain(shop.product.name);
+    expect(err.message).toContain(shop.product.sku);
+  });
+
+  it("accepts an EXPLICIT zero — nil-rated goods are real", async () => {
+    // The whole point of the distinction. Someone who typed 0 has decided.
+    const shop = await unratedShop();
+    await prisma.product.update({
+      where: { id: shop.product.id },
+      data: { gstRate: 0 },
+    });
+
+    const inv = await shop.raise();
+    expect(Number(inv.lines[0]!.gstRate)).toBe(0);
+    expect(Number(inv.lines[0]!.cgstAmount)).toBe(0);
+  });
+
+  it("accepts a per-line override on an unrated product", async () => {
+    // The invoice-level escape hatch: this sale's rate, without editing the
+    // product master data for every future sale.
+    const shop = await unratedShop();
+    const inv = await shop.raise({
+      lines: [
+        {
+          productId: shop.product.id,
+          quantity: 2,
+          unitPrice: 110,
+          gstRate: 12,
+        },
+      ],
+    });
+    expect(Number(inv.lines[0]!.gstRate)).toBe(12);
+    expect(Number(inv.lines[0]!.cgstAmount)).toBeGreaterThan(0);
+  });
+
+  it("leaves NON-GST invoices alone", async () => {
+    // A flat-rate or untaxed invoice makes no claim about GST at all, so it
+    // has nothing to be wrong about. Blocking it would be scope creep with
+    // real cost — most shops here never raise a GST invoice.
+    const shop = await unratedShop();
+    const inv = await shop.raise({ useGst: false });
+    expect(inv.taxMode).toBe("FLAT");
+    expect(inv.status).toBe("DRAFT");
+  });
+
+  it("blocks the same thing through the till", async () => {
+    // The POS composes createInvoice, so it inherits this for free — which is
+    // the point of composing. Checked anyway: the till is where an unrated
+    // product is most likely to be scanned without anyone noticing.
+    const shop = await unratedShop();
+    const { posSale } = await import("../pos/pos.service.js");
+    await expectAppError(
+      posSale(shop.company.id, shop.user.id, {
+        locationId: shop.location.id,
+        lines: [{ productId: shop.product.id, quantity: 1 }],
+        useGst: true,
+        payment: { method: "CASH" },
+      } as Parameters<typeof posSale>[2]),
+      400
+    );
+    // And nothing was written on the way to that refusal.
+    expect(await prisma.invoice.count()).toBe(0);
+  });
+});

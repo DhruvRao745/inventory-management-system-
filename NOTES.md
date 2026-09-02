@@ -1661,16 +1661,508 @@ What it covers that nothing else could:
 
 ---
 
+# P3 — the spec Mr. Rao wrote
+
+PRD §27 listed seven headings under "Future" with no requirements anywhere in
+the document, so P3 could not be built from the PRD. Mr. Rao supplied a written
+spec covering four areas, with accounting integration explicitly excluded.
+
+The three constraints that shaped the code more than anything else — each one
+draws the same line, between a system that RECOMMENDS and a system that ACTS:
+
+1. "Never automatically place an order with a supplier."
+2. "Forecasting is advisory only; it must never directly modify stock or
+   create orders."
+3. "POS sales must use the same inventory, pricing, tax, payment and
+   stock-movement logic as normal sales. Do not create a separate inventory
+   system for POS."
+
+Order of work: purchase automation → analytics → forecasting → POS. Analytics
+before forecasting on purpose: a forecast is only as good as the demand history
+underneath it, and building the honest view of that history first meant the
+forecast had something real to sit on.
+
+---
+
+## P3-1 — Purchase automation
+
+`POST /api/reorder/generate-pos` turns the existing location-based reorder
+recommendations into DRAFT purchase orders.
+
+**It cannot place an order, and not because of a check.** The generator has no
+code path that sets any status but DRAFT, because it calls `createPO()`, which
+only ever creates drafts. A guard someone can delete is a different thing from
+a capability that doesn't exist. Reaching a supplier still needs a human to
+move the order to ORDERED, exactly as before.
+
+Two grouping decisions:
+
+- **One PO per supplier, not one per product.** A purchase order goes to one
+  supplier; the reorder report spans many. Grouping isn't a convenience, it's
+  what makes the output a valid document.
+- **A product short at two locations becomes ONE line.** The report is per
+  shelf because that's how you restock, but you order from a supplier once —
+  where the goods go is decided at receiving.
+
+**What it refuses to do:** a product with no `preferredSupplier` is skipped and
+reported in `skipped[]` with a reason, never assigned a supplier by guesswork.
+Choosing one would be inventing a commercial relationship. The refusal is
+surfaced in the UI rather than logged, because a missing supplier will block
+that product on every future run until someone sets one.
+
+`PurchaseOrder.generatedFrom` ("reorder" or null) exists to answer a question
+the reorder rules can't answer about themselves: are they being acted on, or
+ignored? A rule nobody follows still looks like coverage.
+
+Schema: `PurchaseOrder.generatedFrom String?`, `Invoice.source InvoiceSource`
+(MANUAL | POS) — one migration, `20260901190443_p3_po_source_and_invoice_source`.
+
+### Two test failures that were the test's fault, not the code's
+
+Worth recording because both mistakes were about the FIXTURE, not the logic:
+
+- `createTestCompany()` ships a "Test Widget" with `lowStockThreshold: 5` and
+  no stock and no supplier, so it landed in `skipped` on every run and drowned
+  out what each test was actually checking. Set its threshold to 0 in the
+  fixture.
+- I assumed filtering to an empty location would yield nothing. Wrong: a shelf
+  holding zero of a TRACKED product is short by definition — `onHand: 0` is
+  below any minimum. "No stock here" and "not relevant here" look alike and are
+  opposites; only a zero minimum removes a shelf from the report. The test now
+  asserts the empty location orders MORE than the stocked one.
+
+---
+
+## P3-2 — Advanced analytics
+
+No schema changes. Everything is computed from what the ledger already holds.
+
+`lib/analytics.ts` holds the maths as pure functions with no database access,
+for the same reason `lib/gst.ts` has none: these are formulas with opinions
+baked into them, and an opinion should be testable in isolation rather than
+buried in a query.
+
+**The design rule: every function can return "I don't know."** Analytics is the
+part of a system most likely to produce a confident number from nothing — a
+turnover ratio from two weeks of data, an ABC classification of four products,
+a "declining" trend drawn from three sales. Those figures are worse than
+blanks, because a blank prompts a question and a wrong number ends one.
+
+### Turnover — why it reconstructs history
+
+COGS ÷ **average** inventory value. The tempting implementation divides by
+today's `stockValue`, because that's the number sitting in the database. It is
+wrong the moment stock levels moved during the period — which is always, since
+selling is what turnover measures. A shop that ran its stock down would report
+a spectacular ratio purely because the denominator collapsed.
+
+The ledger is append-only, so stock at any past date is exactly
+`SUM(movements WHERE createdAt <= date)`. Not an estimate — a reconstruction.
+
+One approximation remains and the response states it in `note`: historical
+QUANTITIES are valued at today's average cost, because a per-product-per-day
+running average isn't stored. Fine for a ratio, explicitly not a balance sheet.
+
+`ratio` is null, not 0, when no stock was held. Zero reads as "nothing sold",
+which is a different and damning claim.
+
+### The ABC bug the test caught
+
+`abcAnalysis` banded on the cumulative share AFTER adding each item. Take one
+product worth 81% of revenue: 81 > 80, so the single most important line in the
+business is filed under B and nothing at all is an A. Demoted for being too
+important.
+
+Correct question: "had we already covered 80% BEFORE reaching this one?" The
+top item always has 0% behind it, so there is always at least one A. Same rule,
+off by one item — and the difference only ever shows on the item straddling the
+boundary, which is exactly the one that matters.
+
+**The docstring already described the correct behaviour.** I wrote the intent
+down and then implemented the opposite. The test disagreed with the code only
+because it was written from the intent rather than from the implementation —
+tests written by reading the code back to yourself agree with it by
+construction and catch nothing.
+
+### The judgement calls, stated
+
+- **ABC refuses below 10 selling products.** Sorting six items into three bands
+  tells you nothing you couldn't see by looking at six items, and dresses an
+  arbitrary split in the language of analysis. It still ranks them.
+- **Trend has a ±15% dead zone.** 10 units then 11 is noise. Calling it growth
+  gets someone ordering stock on the strength of one extra sale.
+- **Trend needs 6 points.** Halving a three-point series is not analysis.
+- **0 → 10 reports no percentage.** Growth from nothing has no percentage;
+  "infinite" is not a figure.
+- **Dead (never sold) is separated from slow.** The remedy differs — slow stock
+  might need a promotion, dead stock probably needs writing off. And dead stock
+  never appears in any sales report BY DEFINITION, so it is the easiest kind to
+  keep paying for without noticing.
+- **A product with no stock is not dead, it's absent.** Reporting it would fill
+  the list with things that cost nothing to hold.
+
+### Endpoints
+
+`GET /reports/turnover?from&to` · `/dead-stock?slowAfterDays&staleAfterDays`
+(defaults 60/120) · `/abc?from&to&basis=revenue|quantity` · `/trends?from&to&tzOffset`
+
+ABC reads revenue from invoice LINES, not stock movements: a movement knows
+what stock cost, not what it sold for. Trends emit a point for every day
+including empty ones — a gap is a real zero, and dropping it would flatter the
+trend by hiding the days nothing sold.
+
+### The UI is a separate page on purpose
+
+`/analytics`, not more of `/reports`. Reports answers "what happened" — every
+figure is a fact you could count by hand. These four answer "what does it
+mean", and each has a judgement call inside it. On one page, the authority of a
+bank balance leaks onto a trend line drawn from eleven days of data.
+
+Consequences of that, in the markup:
+
+- Turnover prints opening → closing side by side, because the average between
+  them IS the denominator above. A reader who can't see both can't check it.
+- "Days of stock" distinguishes two blanks: no stock held, versus stock held
+  and nothing sold. Both would otherwise be a dash, and a dash looks like a bug.
+- ABC's refusal is styled as loudly as a result would be — amber left border,
+  not grey small print. The failure mode is skimming past it.
+- Trend badges HIDE the percentage when the verdict is "steady". Show "+7%"
+  next to the word steady and people believe the number and ignore the word.
+- Daily volume is drawn as bars, not a line. A line implies the values between
+  two points mean something; there is no such thing as half past Tuesday's
+  sales. Empty days draw a 2px stub so a zero looks like a zero, not a hole.
+- Default range is 3 months, not the current month like Reports — every figure
+  here degrades as the window shrinks.
+
+Dead stock is deliberately NOT tied to the date range: stock sitting unsold is
+sitting unsold whatever window you're looking at, and "no dead stock in March"
+is a meaningless comfort.
+
+383 tests passing (347 → +12 generate-PO, +20 analytics maths, +16 analytics
+endpoints, minus overlap).
+
+---
+
+## P3-3 — Demand forecasting
+
+`GET /api/reports/forecast`, `lib/forecast.ts`, and a Forecast section at the
+top of the Analytics page. No schema changes.
+
+**Advisory-only is structural, not a promise.** No POST route, no service call
+that writes, no transaction. The first test counts movements, orders, invoices
+and products before and after two forecast calls and asserts they are
+identical — a comment saying "this doesn't write" is worth nothing beside a
+test that checks.
+
+**Weighted moving average, four buckets, 1:2:3:4 oldest to newest.** Demand
+drifts; a product that sold well in June and stopped in August has a flat
+average describing neither month. Exponential smoothing or ARIMA would give a
+more PRECISE answer to a question this data cannot support, and precision reads
+as confidence. This one can be explained in a sentence to the person spending
+the money, which matters more here than a better fit.
+
+Any remainder in the split goes to the LATER buckets, so the newest quarter is
+never the short one — giving recent data fewer days would work against the
+whole point of the weighting.
+
+**Three refusals, each with its reason on screen:**
+
+- under 21 days of history — there are no "recent weeks", only days
+- sold on fewer than 3 separate days — two sale days in ninety is two events,
+  not a rate, and their average is an artefact of where they fell
+- volatility over 150% of the mean — occasional bulk orders separated by
+  nothing; an average across that describes no day that ever happened
+
+A product that has never sold returns a confident **0**, not a refusal. Ninety
+days of evidence that nobody wants it is real information, and different from
+having no evidence.
+
+**The buffer scales with doubt, not size** (10/20/35% by confidence). Not
+because shaky demand is higher, but because the two errors cost differently:
+too much stock ties up cash, too little loses the sale.
+
+**Two deliberate omissions.** Suggested quantities do NOT allow for supplier
+lead time, because nothing in the schema records it — ordering 30 days of stock
+from a supplier who takes 3 weeks leaves a gap this number cannot see. The
+caveat is in the API payload, not only the UI, so anything else consuming the
+endpoint inherits it. And availability excludes DAMAGED / QUARANTINE / EXPIRED
+stock: counting those would advise against reordering goods that cannot be
+sold.
+
+`daysOfCover` is the most actionable figure on the row. "40 units, 12 days
+left" prompts a decision; "predicted demand 98" does not.
+
+### Eight test failures from one line
+
+`createMovement` takes a POSITIVE quantity and derives the sign from the type —
+only ADJUSTMENT may arrive already signed ("found 2 broken" = −2). My helper
+passed `-quantity` for a SALE and the service rejected every one.
+
+---
+
+# The same bug three times, and the rule that comes out of it
+
+Worth its own section because it is not about analytics.
+
+1. **Turnover printed "stock held, nothing sold"** above a chart showing 129
+   units sold. COGS was zero because legacy sales have no `costAtTime`, and the
+   UI inferred "no sales" from "no cost".
+2. **Dead stock printed "everything you hold has sold within 60 days"**
+   whenever the result was empty — but empty also means *you are holding
+   nothing*, and the message picked the reassuring cause.
+3. **Turnover called a full warehouse empty.** Stock value was zero because
+   nothing had a recorded cost, and the `average <= 0` branch reported "no
+   stock was held at any point in this period" about a warehouse you could walk
+   into.
+
+Every one is the same mistake: **an ambiguous value, a branch choosing one of
+its meanings, and the wrong one printed with confidence.**
+
+> **The rule: when a number can reach the same value by two different routes,
+> the value is not the answer. Carry the reason down from the point where the
+> routes diverge.**
+
+In practice that meant `unavailableReason` as text from the server, plus
+`salesCount`, `productsHeld` and `heldStock` as inputs — `heldStock` made
+REQUIRED with no default, so the six other call sites failed to compile and had
+to decide rather than inherit a guess.
+
+All 383 tests passed while bug 1 was live on screen. The maths was right; the
+EXPLANATION was wrong, and no test asserted on an explanation. Several do now.
+
+---
+
+## P3-4 — Point of sale
+
+`POST /api/pos/sale` — one route, and that is the entire server surface. A till
+also needs barcode lookup, locations and printing; all three already exist, so
+the screen calls the ordinary endpoints. POS-flavoured copies would have been
+the first step toward the separate system the spec forbids.
+
+**`pos.service.ts` composes, it does not implement:**
+
+```
+createInvoice()  →  issueInvoice()  →  recordPayment()
+```
+
+Search that file for `stockMovement`, `avgCost` or `cgst` and there are none.
+No stock written, no tax computed, no cost stamped — all of it happens in the
+code that already does it for a typed invoice.
+
+**Why this is the decision that mattered.** A POS is where a second inventory
+system gets born. The pressure is real: the till must be fast, the invoice
+screen has fields a counter doesn't want, and writing a movement directly is
+three lines instead of a service call. Take that shortcut and two code paths
+both deduct stock — and every rule added afterwards (oversell guards, FEFO,
+GST, reservations, costing) has to be remembered twice. The second one rots
+quietly. Six months later the shop's counter sales aren't in COGS and nobody
+can say when that started.
+
+**So the first test rings up identical goods twice** — once through the till,
+once through the invoice screen — and asserts the two ledger rows are
+`toEqual`: quantity, stamped cost, status, shelf. A comment claiming "we reuse
+the invoice service" would survive someone adding a stock write here. That test
+would not.
+
+### Deliberately NOT one transaction
+
+The three services each own their transaction and POS does not wrap them in a
+fourth. That looks like a gap; it is a decision, and the reason is physical.
+
+If payment fails, one transaction would roll back the stock deduction too — but
+at a counter the goods are already in the customer's bag. Un-selling them makes
+the ledger disagree with the shelf, which is the one thing this system exists
+to prevent. The stock left; that is a fact, and facts are not rolled back
+because a later step failed.
+
+What you get instead is an ISSUED, UNPAID invoice — not a corruption but a
+state the system already models, displays and collects against. The one real
+danger is a blind retry of the whole sale, which would deduct stock twice, so
+the error names the invoice and says explicitly **do not ring this sale again**.
+
+### Two smaller decisions
+
+- **Prices resolve server-side.** The till may override, but the default is
+  read at the moment of sale. A price sent up from the browser is whatever that
+  tab loaded — possibly hours old, possibly edited — and the resulting invoice
+  would look entirely ordinary afterwards.
+- **Change, not overpayment.** ₹500 tendered against a ₹380 bill records ₹380
+  and reports ₹120 change. Recording ₹500 would leave the invoice permanently
+  in credit for money that went back across the counter in coins.
+
+`source` is a service PARAMETER, not a request field — same pattern as
+`generatedFrom` on `createPO`. A client that could set it could make counter
+sales appear in the till's takings, or hide them from it. There is a test.
+
+STAFF may sell. Gating a counter sale to managers would leave a shop unable to
+serve customers whenever the manager is out, and staff can already issue
+invoices — the same act through a different screen.
+
+### The till screen (`/pos`)
+
+Everything follows from one fact: somebody is standing there waiting.
+
+- The scan box keeps focus between customers. A scanner types into whatever is
+  focused; if nothing is, it types into the void.
+- The total is the largest thing on screen because it is read aloud.
+- Change is enormous and stays up after the sale, because it is counted out of
+  a drawer by hand while the next customer is already talking.
+- Scanning the same item twice bumps the line rather than adding another —
+  "Milk ×1, Milk ×1, Milk ×1" is needlessly hard to check against a bag.
+
+The running total is labelled an ESTIMATE and excludes tax. This screen doesn't
+know the place of supply, each product's rate, or how rounding falls, and
+reimplementing that here to show a slightly better number is exactly how a
+second, wrong tax engine gets written. The receipt shows the server's figures.
+
+Online-only per the spec: no queue, no local persistence. A sale that cannot
+reach the server has not happened, and the cashier finds out immediately rather
+than discovering at closing time that a queue never drained.
+
+446 tests passing.
+
+---
+
+# A missing GST rate is not a rate of zero
+
+Found by ringing up a real sale at the till, not by a test. The invoice printed
+**CGST @ 0% / SGST @ 0%** for a product whose `gstRate` had never been set.
+
+One line caused it, in `computeInvoiceGst`:
+
+```ts
+const rate = line.gstRate ?? params.defaultGstRate ?? ZERO;
+```
+
+`Product.gstRate` is nullable, and the two states are different facts:
+
+- `0` → nil-rated or exempt goods. A real, deliberate answer.
+- `null` → nobody has decided yet.
+
+Collapsing them makes the invoice state that the goods are zero-rated. On a
+tax document that is a claim, not a blank field — and once the line is stamped
+nothing downstream can tell which happened.
+
+**This is the fourth instance of the pattern in the section above**, and the
+only one with legal weight. Same shape every time: an ambiguous value, a branch
+picking one meaning, the wrong one printed with confidence.
+
+### Where the check had to go, and why it isn't where I first put it
+
+My instinct was to block at ISSUE time — a draft isn't a legal document, an
+issued invoice is. That would not have worked. `stampGst` runs at draft CREATE
+and writes the resolved rate onto the line, so by issue time the row reads
+`gstRate = 0` with no way to know whether a human typed it. The null is already
+gone.
+
+> **The check has to live at the last moment the ambiguity still exists.**
+> Here that is inside `stampGst`, immediately before the write that destroys it.
+
+`stampGst` is called only from draft create and draft update, never on an
+issued invoice (history is immutable), so no existing invoice is re-stamped or
+changed.
+
+### The escape hatches, all deliberate
+
+- **Explicit `0` passes** — nil-rated and exempt supplies are real, and someone
+  who typed 0 has decided. That IS the distinction.
+- **Per-line `gstRate` override passes** — this sale's rate, without editing
+  product master data for every future sale.
+- **Non-GST invoices untouched** — a FLAT invoice makes no claim about GST, so
+  it has nothing to be wrong about. Blocking it would be scope creep with real
+  cost; most shops here never raise a GST invoice.
+
+The POS inherits the block for free by composing `createInvoice`, but it is
+tested there separately: the till is where an unrated product is most likely to
+be scanned with nobody looking, and the test also asserts no invoice row
+survives the refusal.
+
+### Then the same check, moved earlier
+
+The server can only refuse at the moment of sale, which at a counter is the
+worst possible time — goods bagged, total said out loud. So `PosPage` runs the
+identical check the instant "GST invoice" is ticked, naming the products and
+linking to them, and disables the button.
+
+Possible only because the client already holds every product's rate, so nothing
+is duplicated that it would otherwise have to fetch. It reports the gap and
+never guesses what the rate should be — the server still decides.
+
+The disabled button is the point: **a button that can only fail is worse than a
+disabled one**, because it invites a cashier to keep pressing it in front of a
+customer.
+
+### Then earlier still: the rate became mandatory on the product
+
+Mr. Rao's call, and the right one — it moves the discovery from the busiest
+moment (a customer waiting at the till) to the calmest (creating the product).
+
+**Scoped to GST-REGISTERED companies, not to everyone.** `assertGstRateDecided`
+in `product.service.ts` checks whether the company has a `stateCode` or
+`gstin`; if not, the field stays optional.
+
+The reasoning matters more than the code. StockPilot is multi-tenant and plenty
+of shops never raise a GST invoice — `taxMode` FLAT exists for exactly them,
+and a company with no state code is already blocked from GST invoicing. Forcing
+those companies to answer a tax question that means nothing to them would not
+make anything more correct; it would make them type a number to get past the
+form.
+
+> **A required field people resent is a field full of lies.** A catalogue of
+> 18%s nobody meant is worse than an honest blank, because the blank is
+> visible and the fake rate is not.
+
+Tying the rule to the registration rather than to a separate setting also means
+it flips on by itself: registering for GST later cannot leave a half-configured
+catalogue behind.
+
+**Enforced on create AND update.** No backfill is possible — nobody can infer a
+tax rate from a product name, and guessing is the exact mistake this whole
+change exists to prevent. Enforcing on edit turns each future edit into a small
+cleanup at the moment someone already has the product open.
+
+CSV import inherits it for free, because `importProducts` calls
+`createProduct`; rate-less rows come back in the existing per-row error list
+instead of being created silently.
+
+On the form, "Not set" is no longer OFFERED to a GST-registered company — an
+option the server will reject is worse than no option — replaced by
+"— choose a rate —" and a note that 0% is a real answer and blank is not.
+
+Existing products stay sellable throughout: the rule gates writing a product,
+not selling one, and a FLAT invoice makes no claim about tax.
+
+463 tests passing.
+
+---
+
 # Still open
 
-- **Samsung S26 Ultra is valued at ₹60,000/unit** — its purchases were recorded
-  at what looks like the SELLING price (costPrice says ₹50,000). That is a
-  ₹490,000 overvaluation on one product. If wrong, correct it with an
-  ADJUSTMENT movement rather than editing the figure — same principle as
-  everything else in the ledger.
 - **Railway Custom Start Command** still overrides the Dockerfile CMD, so
   `migrate deploy` never runs on deploy. Clearing it ends the manual step.
 - **Railway Custom Build Command** is dormant (the Dockerfile wins) but would
   ship a server with no frontend if the Dockerfile were ever renamed.
-- **P3 has no specification.** Seven headings under "Future" in PRD §27, with
-  no requirements anywhere in the document. Needs a written spec first.
+- **The till lets you build a basket before finding out stock is unsellable.**
+  The GST gap is now caught the moment it appears, but a batch-tracked product
+  with an empty batch pool still fails at the payment moment. Fixing that needs
+  per-location availability on the client — a server call per basket line, so a
+  bigger piece than the GST check.
+- ~~Some products have no GST rate.~~ Fixed by Mr. Rao; GST sales through the
+  till confirmed working. Any remaining product without a rate is now caught
+  the next time it is edited.
+- **Barcode scanning at the till needs barcodes on products.** The `add_product_barcode`
+  migration ran, but products still need codes generated (Products → edit →
+  Generate barcode). Until then the scan box finds nothing and the search
+  picker is the only way to add an item — which works, but isn't the till
+  experience.
+- **P3 is code-complete**: purchase automation, analytics, forecasting, POS.
+  Accounting integration remains explicitly out of scope per Mr. Rao's spec.
+
+## Closed since last time
+
+- **Samsung S26 Ultra valued at ₹60,000/unit** — recorded at the selling price
+  instead of cost. Corrected via `prisma/revalue-product.ts`, which fixes
+  `avgCost`/`stockValue` in a transaction and writes a `stock.revalue` audit
+  entry, leaving the movement rows untouched. Production never held the
+  product, so no prod run was needed.
+- **P3 had no specification.** Mr. Rao wrote one; see above.

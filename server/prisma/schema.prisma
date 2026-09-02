@@ -335,6 +335,16 @@ model PurchaseOrder {
   status       PurchaseOrderStatus @default(DRAFT)
   notes        String?
   expectedDate DateTime? // when we expect delivery (optional)
+  /// Where this order came from (P3-1). NULL = raised by hand; "reorder" =
+  /// generated from the reorder report.
+  ///
+  /// Kept because it answers a question the rules themselves cannot: are the
+  /// reorder levels being acted on, or quietly ignored? A rule nobody follows
+  /// is worse than no rule, because it still looks like coverage.
+  ///
+  /// A free-text tag rather than an enum so a future generator (a forecast,
+  /// say) can mark its own output without a migration.
+  generatedFrom String?
   createdById  String
   createdAt    DateTime            @default(now())
   updatedAt    DateTime            @updatedAt
@@ -493,6 +503,16 @@ model SupplierReturnLine {
 // INVOICES (selling stock — Phase F4)
 // ------------------------------------------------------------
 
+/// How an invoice was raised (P3-4).
+///
+/// POS sales run through exactly the same invoice, stock, tax and payment
+/// logic as any other sale — this records WHERE the sale happened, not a
+/// different kind of sale. There is deliberately no separate POS inventory.
+enum InvoiceSource {
+  MANUAL // created in the invoices screen
+  POS    // rung up at the counter
+}
+
 /// Which tax regime an invoice was raised under (P2-3). See Invoice.taxMode.
 enum TaxMode {
   FLAT // legacy: one taxRate for the whole invoice
@@ -528,6 +548,14 @@ model Invoice {
   customerPhone   String?
   customerAddress String?
   customerGstin   String? // buyer's GST — snapshot, for B2B invoices
+  /// How this invoice was raised (P3-4).
+  ///
+  /// Defaults to MANUAL, which is what every existing invoice genuinely is —
+  /// so no backfill is needed and no historical record changes meaning.
+  ///
+  /// Without it, "what did the counter take today?" is unanswerable: a POS
+  /// sale and a back-office invoice are the same row in every report.
+  source          InvoiceSource @default(MANUAL)
   notes           String?
   taxRate         Decimal? @db.Decimal(5, 2) // % applied after discount (A3)
   discount        Decimal? @db.Decimal(12, 2) // flat amount off the subtotal (A3)

@@ -114,10 +114,66 @@ export async function importProducts(
   return { created, failed: errors.length, errors };
 }
 
+/**
+ * A GST-registered company must decide every product's rate.
+ *
+ * WHY THIS IS CONDITIONAL RATHER THAN A PLAIN REQUIRED FIELD
+ *
+ * StockPilot is multi-tenant, and plenty of shops here never raise a GST
+ * invoice — `taxMode` FLAT exists for exactly them, and a company with no
+ * state code is already blocked from GST invoicing entirely. Forcing those
+ * companies to answer a tax question that has no meaning for them wouldn't
+ * make anything more correct; it would make them type a number to get past the
+ * form, which puts junk in the field instead of an honest blank. A required
+ * field people resent is a field full of lies.
+ *
+ * So the rule follows the registration: if you are set up to charge GST, every
+ * product needs a decided rate. If you are not, the field stays optional.
+ *
+ * WHY IT RUNS ON UPDATE TOO
+ *
+ * Products created before this rule have no rate, and there is no way to
+ * backfill one — nobody can infer a tax rate from a product name, and guessing
+ * would be the exact mistake this whole change exists to stop. Enforcing on
+ * edit turns every future edit into a small, natural cleanup, at the moment
+ * someone already has the product open and in mind.
+ *
+ * `0` PASSES. Nil-rated and exempt goods are real; someone who typed 0 has
+ * decided. Only "blank" is refused.
+ */
+async function assertGstRateDecided(
+  companyId: string,
+  /** Value from the request: number = set it, null = clear, undefined = leave. */
+  incoming: number | null | undefined,
+  /** What's already on the row, for updates. Undefined on create. */
+  existing?: Prisma.Decimal | null
+) {
+  // undefined + an existing value = the caller isn't touching the field.
+  const effective = incoming === undefined ? (existing ?? null) : incoming;
+  if (effective !== null && effective !== undefined) return;
+
+  const company = await prisma.company.findUnique({
+    where: { id: companyId },
+    select: { stateCode: true, gstin: true },
+  });
+  const registered = Boolean(company?.stateCode || company?.gstin);
+  if (!registered) return; // not a GST business — the field means nothing here
+
+  throw new AppError(
+    400,
+    "Set a GST rate for this product. Your business is registered for GST, so " +
+      "every product needs a decided rate — enter 0 if these goods really are " +
+      "nil-rated or exempt. Leaving it blank isn't the same thing: an invoice " +
+      'would print "0%" as if you had chosen it.'
+  );
+}
+
 export async function createProduct(
   companyId: string,
   input: CreateProductInput
 ) {
+  await assertGstRateDecided(companyId, input.gstRate);
+
   // SKU must be unique within THIS company only
   const duplicate = await prisma.product.findFirst({
     where: { companyId, sku: input.sku },
@@ -171,6 +227,10 @@ export async function updateProduct(
   // ₹50 to ₹500, and when?" answerable. The row itself only shows ₹500, and
   // no amount of inference can recover what it used to be.
   const existing = await getProduct(companyId, id); // proves it exists AND is ours
+
+  // Enforced on edit as well as create, so products predating this rule get
+  // cleaned up as they're touched. See assertGstRateDecided.
+  await assertGstRateDecided(companyId, input.gstRate, existing.gstRate);
 
   if (input.sku) {
     const duplicate = await prisma.product.findFirst({

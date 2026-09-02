@@ -75,7 +75,12 @@ async function assertProducts(
 export async function createPO(
   companyId: string,
   createdById: string,
-  input: CreatePOInput
+  input: CreatePOInput,
+  /**
+   * Where this order came from (P3-1). Omitted for a hand-raised PO; set to
+   * "reorder" by the recommendation generator.
+   */
+  generatedFrom?: string
 ) {
   return prisma.$transaction(async (tx) => {
     await assertSupplier(tx, companyId, input.supplierId);
@@ -108,6 +113,7 @@ export async function createPO(
         supplierId: input.supplierId,
         number,
         notes: input.notes,
+        generatedFrom: generatedFrom ?? null,
         expectedDate: input.expectedDate
           ? new Date(input.expectedDate)
           : undefined,

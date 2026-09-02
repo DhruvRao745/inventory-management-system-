@@ -3,7 +3,7 @@
  * timezone-safe range conversion); presentation on tokens.
  */
 import { useEffect, useState, type FormEvent } from "react";
-import { useNavigate } from "react-router-dom";
+import { Link, useNavigate } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
 import { downloadCsv } from "../lib/csv";
 import { formatMoney } from "../lib/format";
@@ -16,6 +16,30 @@ import {
   SectionTitle,
 } from "../components/ui";
 import type { StockStatusRow } from "../lib/types";
+import { poNumber } from "../lib/types";
+
+/**
+ * What POST /reorder/generate-pos returns (P3-1).
+ *
+ * `skipped` is as important as `created`: a product with no preferred supplier
+ * can't be ordered, and reporting that is what turns a silent gap into
+ * something someone can fix.
+ */
+type GenerateResult = {
+  created: {
+    purchaseOrderId: string;
+    number: number;
+    supplier: { id: string; name: string };
+    lineCount: number;
+    totalCost: number;
+  }[];
+  skipped: {
+    productId: string;
+    sku: string;
+    name: string;
+    reason: string;
+  }[];
+};
 import { formatQty } from "../lib/format";
 import { STATUS_COLORS } from "../components/StockStatusBar";
 
@@ -302,6 +326,10 @@ export function ReportsPage() {
 
   const navigate = useNavigate();
   const [reorder, setReorder] = useState<ReorderRow[] | null>(null);
+  // Draft-PO generation (P3-1).
+  const [genBusy, setGenBusy] = useState(false);
+  const [genResult, setGenResult] = useState<GenerateResult | null>(null);
+  const [genError, setGenError] = useState<string | null>(null);
   const [draftingId, setDraftingId] = useState<string | null>(null);
 
   async function draftPO(r: ReorderRow) {
@@ -470,6 +498,34 @@ export function ReportsPage() {
       ["Type", "Movements", "Net quantity"],
       summary.map((s) => [s.type, s.movements, s.netQuantity])
     );
+  }
+
+  /**
+   * Turn the recommendations into DRAFT purchase orders (P3-1).
+   *
+   * Drafts only — reaching a supplier still needs a human to move the order to
+   * ORDERED. The button says "draft" for that reason: a control that might
+   * place an order should never be ambiguous about whether it did.
+   */
+  async function generateDraftPOs() {
+    setGenBusy(true);
+    setGenError(null);
+    setGenResult(null);
+    try {
+      const res = await api<GenerateResult>("/reorder/generate-pos", {
+        method: "POST",
+        body: {},
+      });
+      setGenResult(res);
+      // The report changes meaning once orders exist, so re-read it.
+      api<ReorderRow[]>("/reports/reorder").then(setReorder).catch(() => {});
+    } catch (err) {
+      setGenError(
+        err instanceof ApiError ? err.message : "Could not create drafts"
+      );
+    } finally {
+      setGenBusy(false);
+    }
   }
 
   return (
@@ -779,17 +835,85 @@ export function ReportsPage() {
 
       {/* ---------- Reorder suggestions ---------- */}
       <div className="space-y-3">
-        <SectionTitle>
-          Reorder suggestions{" "}
-          {reorder && reorder.length > 0 && (
-            <span className="font-bold normal-case tracking-normal text-[var(--muted)]/60">
-              ({reorder.length})
-            </span>
+        <div className="flex flex-wrap items-baseline justify-between gap-2">
+          <SectionTitle>
+            Reorder suggestions{" "}
+            {reorder && reorder.length > 0 && (
+              <span className="font-bold normal-case tracking-normal text-[var(--muted)]/60">
+                ({reorder.length})
+              </span>
+            )}
+          </SectionTitle>
+          {canOrder && reorder && reorder.length > 0 && (
+            <Button onClick={generateDraftPOs} disabled={genBusy}>
+              {genBusy ? "Creating…" : "Create draft orders"}
+            </Button>
           )}
-        </SectionTitle>
+        </div>
         {reorder && reorder.length === 0 && (
           <div className={`${cardClass} p-6 text-sm font-bold text-[var(--muted)]`}>
             Nothing needs reordering — every location is above its minimum. 🎉
+          </div>
+        )}
+
+        {genError && <ErrorAlert>{genError}</ErrorAlert>}
+
+        {genResult && (
+          <div className={`${cardClass} space-y-2 p-4`}>
+            {genResult.created.length > 0 ? (
+              <>
+                <p className="text-sm font-black text-[var(--text)]">
+                  {genResult.created.length} draft order
+                  {genResult.created.length === 1 ? "" : "s"} created — review
+                  before ordering.
+                </p>
+                {genResult.created.map((c) => (
+                  <div
+                    key={c.purchaseOrderId}
+                    className="flex flex-wrap items-baseline justify-between gap-2 text-sm"
+                  >
+                    <span className="font-bold text-[var(--text)]">
+                      <Link
+                        to={`/purchase-orders/${c.purchaseOrderId}`}
+                        className="text-[var(--accent)] hover:underline"
+                      >
+                        {poNumber(c.number)}
+                      </Link>{" "}
+                      · {c.supplier.name}
+                    </span>
+                    <span className="font-semibold text-[var(--muted)]">
+                      {c.lineCount} item{c.lineCount === 1 ? "" : "s"} ·{" "}
+                      {formatMoney(c.totalCost, company?.currency)}
+                    </span>
+                  </div>
+                ))}
+              </>
+            ) : (
+              <p className="text-sm font-bold text-[var(--muted)]">
+                No orders created.
+              </p>
+            )}
+
+            {/* Products that could not be ordered, and why. Reported rather
+                than silently dropped — a missing supplier will block that
+                product every single time until someone sets one. */}
+            {genResult.skipped.length > 0 && (
+              <div className="border-t-2 border-[var(--line)]/20 pt-2">
+                <p className="text-xs font-black uppercase tracking-wide text-[var(--muted)]">
+                  Not ordered ({genResult.skipped.length})
+                </p>
+                {genResult.skipped.map((sk) => (
+                  <div
+                    key={sk.productId}
+                    className="text-sm font-semibold text-[var(--muted)]"
+                  >
+                    {sk.name}{" "}
+                    <span className="font-mono text-xs">{sk.sku}</span> —{" "}
+                    <span className="text-red-500">{sk.reason}</span>
+                  </div>
+                ))}
+              </div>
+            )}
           </div>
         )}
         {reorder && reorder.length > 0 && (

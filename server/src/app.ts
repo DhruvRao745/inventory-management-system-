@@ -31,6 +31,7 @@ import { supplierReturnsRouter } from "./modules/supplier-returns/supplier-retur
 import { reorderRouter } from "./modules/reorder/reorder.routes.js";
 import { stockCountsRouter } from "./modules/stock-counts/count.routes.js";
 import { reservationsRouter } from "./modules/stock/reservation.routes.js";
+import { posRouter } from "./modules/pos/pos.routes.js";
 import { errorHandler } from "./middleware/error.js";
 
 export const app = express();
@@ -100,6 +101,7 @@ app.use("/api/supplier-returns", supplierReturnsRouter);
 app.use("/api/reorder", reorderRouter);
 app.use("/api/stock-counts", stockCountsRouter);
 app.use("/api/reservations", reservationsRouter);
+app.use("/api/pos", posRouter);
 
 // --- 404 for unknown API routes (always JSON, never HTML) ---
 app.use("/api", (_req, res) => {

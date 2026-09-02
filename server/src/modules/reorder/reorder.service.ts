@@ -257,3 +257,162 @@ export async function deleteSetting(companyId: string, id: string) {
   if (!existing) throw new AppError(404, "Setting not found");
   await prisma.productLocationSetting.delete({ where: { id: existing.id } });
 }
+
+/* ==================================================================== *
+ * P3-1 — turning recommendations into draft purchase orders            *
+ * ==================================================================== */
+
+/**
+ * Generate DRAFT purchase orders from the reorder report.
+ *
+ * WHAT THIS IS AND ISN'T
+ *
+ * It is a clerical shortcut: the report already knows what is short, how much
+ * to order and from whom, and re-typing that into a purchase order is work a
+ * machine should do.
+ *
+ * It is NOT automatic ordering. Every order it creates is a DRAFT, and a draft
+ * reaches a supplier only when a human moves it to ORDERED — the same
+ * transition that has always existed. Nothing here can place an order, and
+ * that is a structural property rather than a rule someone has to remember:
+ * this function has no way to set any status but DRAFT.
+ *
+ * WHY IT PRODUCES SEVERAL ORDERS
+ *
+ * A purchase order goes to ONE supplier. A reorder report spans many. Twelve
+ * short shelves across three suppliers is three orders, not one — grouping is
+ * not a convenience here, it is what makes the output valid.
+ *
+ * LINES WITH NO SUPPLIER ARE REFUSED, NOT GUESSED
+ *
+ * A product with no preferred supplier cannot be ordered, and picking one for
+ * the user would be inventing a commercial relationship. Those rows come back
+ * in `skipped` with a reason, so the gap is visible and fixable rather than
+ * silently dropped.
+ *
+ * QUANTITIES ACROSS LOCATIONS ARE SUMMED
+ *
+ * The report is per shelf ("Warehouse A needs 8, Shop needs 3") because that
+ * is how you restock. But you order from a supplier once, for 11. Where the
+ * goods then go is a receiving decision, made when they arrive.
+ */
+export type GeneratedPO = {
+  purchaseOrderId: string;
+  number: number;
+  supplier: { id: string; name: string };
+  lineCount: number;
+  totalCost: number;
+};
+
+export type SkippedRecommendation = {
+  productId: string;
+  sku: string;
+  name: string;
+  reason: string;
+};
+
+export async function generateDraftPOs(
+  companyId: string,
+  userId: string,
+  options: { locationId?: string; productIds?: string[] } = {}
+): Promise<{ created: GeneratedPO[]; skipped: SkippedRecommendation[] }> {
+  const rows = await reorderReport(companyId, {
+    locationId: options.locationId,
+  } as never);
+
+  const wanted = options.productIds?.length
+    ? rows.filter((r) => options.productIds!.includes(r.productId))
+    : rows;
+
+  const skipped: SkippedRecommendation[] = [];
+
+  // supplierId → productId → line
+  const bySupplier = new Map<
+    string,
+    {
+      supplierName: string;
+      lines: Map<
+        string,
+        { productId: string; quantity: number; unitCost: number }
+      >;
+    }
+  >();
+
+  for (const row of wanted) {
+    if (!row.preferredSupplier) {
+      skipped.push({
+        productId: row.productId,
+        sku: row.sku,
+        name: row.name,
+        reason: "No preferred supplier set",
+      });
+      continue;
+    }
+    if (row.suggestedQty <= 0) {
+      // Defensive: the report shouldn't produce these, but a zero-quantity
+      // line would fail validation deeper in and produce a confusing error.
+      skipped.push({
+        productId: row.productId,
+        sku: row.sku,
+        name: row.name,
+        reason: "Nothing to order",
+      });
+      continue;
+    }
+
+    const group = bySupplier.get(row.preferredSupplier.id) ?? {
+      supplierName: row.preferredSupplier.name,
+      lines: new Map(),
+    };
+
+    // Same product short at two locations → one line for the total.
+    const existing = group.lines.get(row.productId);
+    group.lines.set(row.productId, {
+      productId: row.productId,
+      quantity: (existing?.quantity ?? 0) + row.suggestedQty,
+      // costPrice is the reference purchase price — the right starting point
+      // for an order someone is about to review. avgCost would be wrong here:
+      // it is what stock HAS cost, not what the supplier will charge.
+      unitCost: Number(row.costPrice),
+    });
+    bySupplier.set(row.preferredSupplier.id, group);
+  }
+
+  const { createPO } = await import("../purchase-orders/po.service.js");
+  const created: GeneratedPO[] = [];
+
+  for (const [supplierId, group] of bySupplier) {
+    const lines = [...group.lines.values()];
+
+    // One PO per supplier, each created through the ORDINARY path — number
+    // locking, precision checks and ownership assertions all apply. Nothing
+    // here writes a purchase order directly.
+    const po = await createPO(
+      companyId,
+      userId,
+      {
+        supplierId,
+        notes: "Generated from the reorder report — review before ordering.",
+        lines: lines.map((l) => ({
+          productId: l.productId,
+          quantity: l.quantity,
+          unitCost: l.unitCost,
+        })),
+      } as Parameters<typeof createPO>[2],
+      "reorder"
+    );
+
+    created.push({
+      purchaseOrderId: po.id,
+      number: po.number,
+      supplier: { id: supplierId, name: group.supplierName },
+      lineCount: lines.length,
+      totalCost:
+        Math.round(
+          lines.reduce((s, l) => s + l.quantity * l.unitCost, 0) * 100
+        ) / 100,
+    });
+  }
+
+  return { created, skipped };
+}

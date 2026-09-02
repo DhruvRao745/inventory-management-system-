@@ -61,7 +61,17 @@ const th =
 const td = "px-4 py-3 text-sm";
 
 export function ProductsPage() {
-  const { user } = useAuth();
+  const { user, company } = useAuth();
+
+  /**
+   * Is this business set up to charge GST?
+   *
+   * Mirrors the server rule in `assertGstRateDecided`. A company with no state
+   * code or GSTIN never raises a GST invoice — it is already blocked from
+   * doing so — and requiring a tax rate from it would only get a number typed
+   * to escape the form, which is worse than an honest blank.
+   */
+  const gstRequired = Boolean(company?.stateCode || company?.gstin);
   const canWrite = user?.role === "ADMIN" || user?.role === "MANAGER";
 
   const [products, setProducts] = useState<Product[]>([]);
@@ -695,20 +705,33 @@ export function ProductsPage() {
                 each invoice line when the invoice is raised, so changing it
                 here never alters an invoice already issued. */}
             <Field
-              label="GST rate %"
+              label={gstRequired ? "GST rate % *" : "GST rate %"}
               hint="copied onto invoices at the time of sale"
             >
               <Select
                 value={form.gstRate}
                 onChange={(e) => setField("gstRate", e.target.value)}
               >
-                <option value="">Not set</option>
+                {/* "Not set" is offered only where it is still a valid answer.
+                    For a GST-registered business it is not, and an option that
+                    the server will reject is worse than no option at all. */}
+                {!gstRequired && <option value="">Not set</option>}
+                {gstRequired && form.gstRate === "" && (
+                  <option value="">— choose a rate —</option>
+                )}
                 {COMMON_GST_RATES.map((r) => (
                   <option key={r} value={String(r)}>
                     {r}%{r === 0 ? " (nil-rated)" : ""}
                   </option>
                 ))}
               </Select>
+              {gstRequired && form.gstRate === "" && (
+                <p className="mt-1 text-xs font-semibold text-amber-500">
+                  Your business is registered for GST, so this is required.
+                  Choose <strong>0%</strong> if these goods are nil-rated or
+                  exempt — that is a real answer; blank is not.
+                </p>
+              )}
             </Field>
             <Field label="Category" hint="optional">
               <Select
