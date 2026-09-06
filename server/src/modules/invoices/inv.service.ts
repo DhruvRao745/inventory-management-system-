@@ -183,6 +183,38 @@ async function resolvePlaceOfSupply(
  * alter it. That is what makes an issued invoice a stable legal document
  * rather than a view over today's configuration.
  */
+/**
+ * Remove every trace of GST from an invoice's lines and header.
+ *
+ * Used when an invoice is not (or is no longer) a GST invoice. Deliberately
+ * sets the columns to NULL rather than 0: on a tax document a stamped 0 is a
+ * positive claim that the goods are zero-rated, while NULL means "GST does
+ * not apply here" — the same distinction stampGst makes for a missing rate.
+ *
+ * `hsnCode` is left alone. It describes what the goods ARE, not what tax was
+ * charged on them, and it is legitimately printed on non-GST paperwork too.
+ */
+async function clearGstStamps(
+  tx: Tx,
+  companyId: string,
+  invoiceId: string
+): Promise<void> {
+  await tx.invoiceLine.updateMany({
+    where: { invoiceId },
+    data: {
+      gstRate: null,
+      taxableValue: null,
+      cgstAmount: null,
+      sgstAmount: null,
+      igstAmount: null,
+    },
+  });
+  await tx.invoice.updateMany({
+    where: { id: invoiceId, companyId },
+    data: { placeOfSupply: null, supplyType: null },
+  });
+}
+
 async function stampGst(
   tx: Tx,
   companyId: string,
@@ -192,7 +224,25 @@ async function stampGst(
     where: { id: invoiceId, companyId },
     include: { lines: true },
   });
-  if (!inv || inv.taxMode !== "GST") return;
+  if (!inv) return;
+
+  // GST IS OFF — and off has to mean off.
+  //
+  // Turning the toggle off used to leave every stamped GST column sitting on
+  // the lines, and left `taxRate` holding whatever flat percentage had been
+  // saved at some point. The total then took the FLAT branch and quietly
+  // charged that old percentage, so an invoice with GST switched off still
+  // came out with tax on it (BUG-4). The stamps also stayed in the database,
+  // where the next reader could not tell them from a live GST invoice.
+  //
+  // Clearing them here — in the one function that owns tax stamping — means
+  // "no GST" is a state the data actually holds, not a flag someone has to
+  // remember to interpret. A flat rate survives only if the caller sets one
+  // in the same request; see updateInvoice.
+  if (inv.taxMode !== "GST") {
+    await clearGstStamps(tx, companyId, invoiceId);
+    return;
+  }
 
   const company = await tx.company.findUnique({
     where: { id: companyId },
@@ -528,7 +578,10 @@ export async function createInvoice(
         customerAddress: input.customerAddress,
         customerGstin: input.customerGstin,
         notes: input.notes,
-        taxRate: input.taxRate ?? null,
+        // The two tax mechanisms are mutually exclusive, and only one of them
+        // may ever be stored. A GST invoice that also carried a flat taxRate
+        // would be one toggle away from silently charging it (BUG-4).
+        taxRate: input.useGst ? null : (input.taxRate ?? null),
         discount: input.discount ?? null,
         taxMode: input.useGst ? "GST" : "FLAT",
         placeOfSupply,
@@ -743,7 +796,24 @@ export async function updateInvoice(
         customerGstin:
           input.customerGstin === undefined ? undefined : input.customerGstin,
         notes: input.notes === undefined ? undefined : input.notes,
-        taxRate: input.taxRate === undefined ? undefined : input.taxRate,
+        /**
+         * Switching GST ON clears any flat rate; switching it OFF clears the
+         * rate too UNLESS this same request sets one.
+         *
+         * That second half is the fix for the reported bug. Unticking GST is
+         * a statement that GST does not apply — it is not a request to fall
+         * back on a percentage the user typed days ago and can no longer see.
+         * If a genuinely separate non-GST tax applies, the caller says so in
+         * the same breath by sending `taxRate`, which is an explicit act.
+         */
+        taxRate:
+          input.useGst === true
+            ? null
+            : input.useGst === false
+              ? (input.taxRate ?? null)
+              : input.taxRate === undefined
+                ? undefined
+                : input.taxRate,
         discount: input.discount === undefined ? undefined : input.discount,
         // GST settings on a DRAFT (P2-3). These have to be written BEFORE
         // stampGst runs below, because stampGst reads the invoice back from

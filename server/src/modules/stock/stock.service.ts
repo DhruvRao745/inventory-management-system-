@@ -554,6 +554,7 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
         name: true,
         unit: true,
         lowStockThreshold: true,
+        tracksBatch: true,
         isActive: true,
       },
     }),
@@ -570,6 +571,36 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
   // Before this, the Stock page and the Product Details location badge were
   // the only places that ignored these, so a location could carry its own
   // minimum and nothing on screen would ever reflect it.
+  // Batch coverage, for batch-tracked products only (BUG-5/BUG-6).
+  //
+  // Two tables can answer "how much can we sell": the ledger, and the lots.
+  // They are meant to agree — the lots are a refinement of the ledger, not a
+  // second opinion — and when they don't, a sale is refused for stock the
+  // product page is happily displaying. Returning both means a screen can no
+  // longer show one of them as if the other did not exist.
+  const batchTracked = products.filter((p) => p.tracksBatch).map((p) => p.id);
+  const batchGroups = batchTracked.length
+    ? await prisma.inventoryBatch.groupBy({
+        by: ["productId", "locationId"],
+        where: {
+          companyId,
+          productId: { in: batchTracked },
+          ...(q.locationId ? { locationId: q.locationId } : {}),
+          // The same filter planAllocation uses, so "what the screen shows"
+          // and "what an allocation can find" are one definition.
+          status: "AVAILABLE",
+          remainingQuantity: { gt: 0 },
+        },
+        _sum: { remainingQuantity: true },
+      })
+    : [];
+  const batchByShelf = new Map<string, Decimal>(
+    batchGroups.map((g): [string, Decimal] => [
+      `${g.productId}:${g.locationId}`,
+      g._sum.remainingQuantity ?? new Dec(0),
+    ])
+  );
+
   const locationSettings = await prisma.productLocationSetting.findMany({
     where: {
       companyId,
@@ -662,6 +693,20 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
         expired,
         reserved,
         available, // sellable − reserved: what a new order can actually take
+
+        /**
+         * For batch-tracked products: what the LOTS hold, using the same
+         * filter an allocation uses. Null for products that don't track
+         * batches, because the question doesn't apply to them.
+         *
+         * This should equal `available` whenever nothing is reserved. If it is
+         * lower, the ledger is holding stock that no lot accounts for — the
+         * "100 on the page, 5 at the till" gap — and the screen can say so
+         * instead of quietly showing the larger number.
+         */
+        batchAvailable: product.tracksBatch
+          ? (batchByShelf.get(`${g.productId}:${g.locationId}`) ?? new Dec(0))
+          : null,
 
         // The minimum that ACTUALLY applies here: this location's if it sets
         // one, otherwise the product's default. Returned, not just used, so

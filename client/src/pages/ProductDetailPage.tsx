@@ -281,6 +281,21 @@ export function ProductDetailPage() {
                         {formatQty(l.available, product.unit)} available
                         {l.lowStock && " · low!"}
                       </span>
+                      {/* Batch coverage. Only shown when the lots hold LESS
+                          than the ledger — that gap is why a sale can be
+                          refused for stock this page is displaying, and the
+                          page should say so rather than let the till be the
+                          one to break the news. */}
+                      {l.batchAvailable !== null &&
+                        qtyNum(l.batchAvailable) < qtyNum(l.available) && (
+                          <span
+                            title="Some stock here isn't assigned to a batch, so it can't be picked for a sale. Re-save the product to place it in an OPENING batch."
+                            className="rounded-[4px] border-2 border-amber-500 bg-amber-500/10 px-2 py-0.5 text-[10px] font-black text-amber-600"
+                          >
+                            only {formatQty(l.batchAvailable, product.unit)} in
+                            batches
+                          </span>
+                        )}
                       {/* The number the badge was judged against, shown next
                           to the badge itself. A location that sets its own
                           minimum REPLACES the product default here, so saying

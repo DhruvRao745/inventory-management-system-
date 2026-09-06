@@ -7,8 +7,13 @@
  */
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
+import { lockStock } from "../../lib/locks.js";
+import {
+  ensureBatchCoverage,
+  OPENING_BATCH,
+} from "../stock/batch.service.js";
 import { AppError } from "../../middleware/error.js";
-import { recordChange } from "../../lib/audit.js";
+import { recordAudit, recordChange } from "../../lib/audit.js";
 import type {
   CreateProductInput,
   UpdateProductInput,
@@ -273,6 +278,11 @@ export async function updateProduct(
     if (dup) throw new AppError(409, `Barcode "${barcode}" is already in use`);
   }
 
+  // Switching batch tracking ON is the moment the gap opens (BUG-5/BUG-6).
+  // Everything already on the shelf is real and belongs to no lot, so the
+  // ledger and the batch table part company the instant the box is ticked.
+  const turningOnBatches = input.tracksBatch === true && !existing.tracksBatch;
+
   return prisma.$transaction(async (tx) => {
     const updated = await tx.product.update({
       where: { id },
@@ -282,6 +292,39 @@ export async function updateProduct(
         preferredSupplier: { select: { id: true, name: true } },
       },
     });
+
+    if (turningOnBatches) {
+      // Give the existing stock a home before anything tries to allocate it.
+      // One opening lot per location that holds sellable stock; the quantity
+      // comes from the ledger, so nothing is invented.
+      const locations = await tx.location.findMany({
+        where: { companyId },
+        select: { id: true },
+      });
+      for (const loc of locations) {
+        await lockStock(tx, companyId, [{ productId: id, locationId: loc.id }]);
+        const opened = await ensureBatchCoverage(
+          tx,
+          companyId,
+          id,
+          loc.id,
+          updated.avgCost
+        );
+        if (opened.greaterThan(0)) {
+          await recordAudit(tx, {
+            companyId,
+            userId: userId ?? null,
+            action: "batch.opening",
+            entity: "product",
+            entityId: id,
+            summary:
+              `${updated.name} (${updated.sku}): ${opened.toString()} existing ` +
+              `units placed in an ${OPENING_BATCH} batch when batch tracking ` +
+              `was switched on`,
+          });
+        }
+      }
+    }
 
     // Same transaction as the update, so the log can never disagree with the
     // data — see the note at the top of lib/audit.ts.

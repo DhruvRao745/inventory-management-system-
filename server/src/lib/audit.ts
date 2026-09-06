@@ -69,6 +69,15 @@ export type AuditAction =
   | "stock.reclassify"
   | "stock_count.complete"
   /**
+   * Existing stock placed into an OPENING batch because batch tracking was
+   * switched on for a product that already had stock.
+   *
+   * Logged because it creates inventory rows nobody typed in. The quantity is
+   * taken from the ledger, so nothing is invented — but a lot appearing on a
+   * report with a batch number nobody recognises needs a traceable reason.
+   */
+  | "batch.opening"
+  /**
    * Correcting a product's weighted-average cost.
    *
    * Needed when a purchase was recorded at the wrong unit cost. The movement

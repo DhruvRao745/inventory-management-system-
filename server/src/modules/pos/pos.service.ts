@@ -33,6 +33,7 @@
 import { AppError } from "../../middleware/error.js";
 import { prisma } from "../../lib/prisma.js";
 import {
+  cancelInvoice,
   createInvoice,
   issueInvoice,
   getInvoice,
@@ -135,7 +136,29 @@ export async function posSale(
   // The oversell guard, the advisory locks, FEFO batch selection and the
   // stamped weighted-average cost all live in here. A till that wrote its own
   // stock movement would have none of them.
-  await issueInvoice(companyId, userId, draft.id);
+  try {
+    await issueInvoice(companyId, userId, draft.id);
+  } catch (err) {
+    /**
+     * The draft RESERVED its lines the moment it was created, and a draft
+     * that never issues keeps holding them. So a till sale that fails the
+     * oversell guard used to leave the shelf permanently short by the amount
+     * it tried to sell: the second attempt then failed too, for stock the
+     * first attempt was still sitting on, and the only symptom was a shop
+     * that could not sell its own goods.
+     *
+     * Rolling back here is safe in a way that rolling back a PAYMENT is not
+     * (see the note above): issueInvoice failed, so NO stock moved and
+     * nothing has left the counter. There is no physical fact to contradict —
+     * only a piece of paperwork that never became a sale.
+     *
+     * Cancelling is best-effort: if it fails, the original error is still
+     * what the operator needs to see, and a stranded draft is visible and
+     * cancellable in the invoice list.
+     */
+    await cancelInvoice(companyId, userId, draft.id).catch(() => undefined);
+    throw err;
+  }
 
   const issued = await getInvoice(companyId, draft.id);
   if (!issued) throw new AppError(500, "Sale was issued but could not be read");

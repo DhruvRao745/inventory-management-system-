@@ -128,9 +128,34 @@ export async function planAllocation(
 
   if (outstanding.greaterThan(0)) {
     const available = quantity.minus(outstanding);
+
+    // Say WHICH of the two numbers fell short, and by how much.
+    //
+    // The old message named only the batch total, so when the ledger said 100
+    // and the lots held 5 the user was told "only 5 available" by a system
+    // that had just shown them 100 on the product page. Two numbers, no
+    // explanation, and no way to tell a genuine shortage from a data gap.
+    const ledger = await tx.stockMovement.aggregate({
+      where: { companyId, productId, locationId, status: "AVAILABLE" },
+      _sum: { quantity: true },
+    });
+    const onHand = ledger._sum.quantity ?? new D(0);
+
+    if (onHand.greaterThan(available)) {
+      // The ledger holds stock that no lot accounts for. Genuinely a data
+      // problem, so it says so rather than blaming the user's quantity.
+      throw new AppError(
+        409,
+        `Batch records are incomplete for this product at this location: the ` +
+          `ledger holds ${onHand.toString()} but only ${available.toString()} ` +
+          `is assigned to batches. Re-save the product to place the ` +
+          `unassigned stock in an ${OPENING_BATCH} batch, then try again.`
+      );
+    }
+
     throw new AppError(
       400,
-      `Not enough batch stock: only ${available.toString()} available across batches at this location`
+      `Not enough stock: only ${available.toString()} available across batches at this location`
     );
   }
 
@@ -330,4 +355,140 @@ export async function listBatches(
       location: { select: { id: true, name: true } },
     },
   });
+}
+
+/* ------------------------------------------------------------------ */
+/* Batch coverage — keeping the lots in step with the ledger           */
+/* ------------------------------------------------------------------ */
+
+/**
+ * The batch number given to stock that predates batch tracking.
+ *
+ * A recognisable, searchable label rather than a blank one: whoever finds it
+ * on a report should be able to tell immediately that this lot is legacy
+ * stock with no known origin, not a real supplier lot number.
+ */
+export const OPENING_BATCH = "OPENING";
+
+/**
+ * Make the batch table cover everything the ledger says is sellable here.
+ *
+ * WHY THIS EXISTS (BUG-5/BUG-6)
+ *
+ * Two tables answer "how much can we sell": the LEDGER (sum of movements,
+ * the immutable record of what we own) and INVENTORY BATCHES (which physical
+ * lot those units belong to). Batches are a refinement of the ledger, never a
+ * second opinion — so a unit in the ledger with no lot is a gap, not a
+ * disagreement.
+ *
+ * The gap opens in one specific way: a product accumulates stock while
+ * `tracksBatch` is false, then someone ticks the box. Every unit already on
+ * the shelf is real, is in the ledger, and belongs to no lot. From that
+ * moment the Product page reads the ledger and says 100, while a sale asks
+ * the batch table and is told 5 — and the same system tells a user two
+ * different things about the same shelf, one of which stops them selling
+ * goods they own.
+ *
+ * The ledger wins, because it is the record of physical fact. This function
+ * closes the gap by creating one opening lot for the uncovered remainder.
+ *
+ * It NEVER invents stock: the quantity is computed from the ledger, so the
+ * batch total can only ever be brought UP TO the ledger, never past it. If
+ * batches already cover the ledger it writes nothing.
+ *
+ * No expiry is set, deliberately — nobody knows it. Under FEFO a null expiry
+ * sorts LAST, so legacy stock is consumed after anything with a known expiry
+ * date, which is the cautious order.
+ *
+ * MUST be called inside a transaction already holding
+ * `lockStock(companyId, [{productId, locationId}])`, like everything else here.
+ */
+export async function ensureBatchCoverage(
+  tx: Tx,
+  companyId: string,
+  productId: string,
+  locationId: string,
+  /** Cost to value the opening lot at — the product's running average. */
+  unitCost: Decimal | null = null
+): Promise<Decimal> {
+  // What the ledger says is SELLABLE here. Damaged and quarantined units are
+  // excluded on purpose: they are not eligible for allocation, so covering
+  // them with an AVAILABLE lot would make them sellable through the back door.
+  const ledger = await tx.stockMovement.aggregate({
+    where: { companyId, productId, locationId, status: "AVAILABLE" },
+    _sum: { quantity: true },
+  });
+  const onHand = ledger._sum.quantity ?? new D(0);
+  if (onHand.lessThanOrEqualTo(0)) return new D(0);
+
+  const batched = await tx.inventoryBatch.aggregate({
+    where: { companyId, productId, locationId, status: "AVAILABLE" },
+    _sum: { remainingQuantity: true },
+  });
+  const covered = batched._sum.remainingQuantity ?? new D(0);
+
+  const shortfall = onHand.minus(covered);
+  if (shortfall.lessThanOrEqualTo(0)) return new D(0);
+
+  const existing = await tx.inventoryBatch.findFirst({
+    where: {
+      companyId,
+      productId,
+      locationId,
+      batchNumber: OPENING_BATCH,
+      status: "AVAILABLE",
+    },
+  });
+
+  if (existing) {
+    await tx.inventoryBatch.update({
+      where: { id: existing.id },
+      data: {
+        receivedQuantity: { increment: shortfall },
+        remainingQuantity: { increment: shortfall },
+      },
+    });
+  } else {
+    await tx.inventoryBatch.create({
+      data: {
+        companyId,
+        productId,
+        locationId,
+        batchNumber: OPENING_BATCH,
+        receivedQuantity: shortfall,
+        remainingQuantity: shortfall,
+        unitCost: unitCost ?? new D(0),
+        expiryDate: null,
+        status: "AVAILABLE",
+      },
+    });
+  }
+
+  return shortfall;
+}
+
+/**
+ * Sum of the lots a sale may actually draw on at this location.
+ *
+ * Same filter as `planAllocation` — positive remainder, AVAILABLE status — so
+ * "what a screen shows" and "what an allocation can find" are one query, not
+ * two similar ones that can drift.
+ */
+export async function batchAvailable(
+  tx: Tx,
+  companyId: string,
+  productId: string,
+  locationId: string
+): Promise<Decimal> {
+  const agg = await tx.inventoryBatch.aggregate({
+    where: {
+      companyId,
+      productId,
+      locationId,
+      status: "AVAILABLE",
+      remainingQuantity: { gt: 0 },
+    },
+    _sum: { remainingQuantity: true },
+  });
+  return agg._sum.remainingQuantity ?? new D(0);
 }

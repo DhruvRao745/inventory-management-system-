@@ -374,6 +374,17 @@ export type StockLevel = {
   /** Which of the two the threshold came from. */
   thresholdSource: "product" | "location";
 
+  /**
+   * For batch-tracked products: what the LOTS hold, by the same filter an
+   * allocation uses. Null when the product doesn't track batches.
+   *
+   * Should match `available` when nothing is reserved. Lower means the ledger
+   * holds stock no lot accounts for, and a sale will be refused for goods the
+   * page is displaying — so the screen says so rather than showing the bigger
+   * number and letting the till contradict it.
+   */
+  batchAvailable: string | null;
+
   /** Judged on `available`, not on hand — see the note in stock.service.ts. */
   lowStock: boolean;
 };

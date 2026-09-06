@@ -2463,3 +2463,151 @@ arrive; the net position is carried by `paymentStatus` and `balanceAmount`.
 Analytics (turnover, ABC, forecasting) still reads `SALE` movements, since it
 measures demand and throughput rather than revenue; whether a return should
 reduce forecast demand is a product question, not a bug.
+
+## BUG-4 (P1) — GST off, tax still charged
+
+**Reported:** with GST on, CGST/SGST are configured and saved. Untick GST and
+tax is still applied, as a percentage.
+
+**Root cause — two tax mechanisms alive at once.** `Invoice.taxMode` routes the
+total: `GST` sums the per-line stamped CGST/SGST/IGST, anything else applies
+the flat `Invoice.taxRate`. Turning the toggle off flipped `taxMode` to `FLAT`
+and left **both** of the GST-era leftovers in place:
+
+1. `taxRate` survived the switch, so the FLAT branch charged a percentage the
+   user could no longer see anywhere on screen.
+2. The stamped per-line GST columns stayed on the lines. The saved GST
+   configuration was still sitting in the database, indistinguishable from a
+   live one to anything that read the rows directly.
+
+**Fix.** `stampGst` no longer returns early for a non-GST invoice — it calls a
+new `clearGstStamps`, which NULLs `gstRate`, `taxableValue`, `cgstAmount`,
+`sgstAmount`, `igstAmount` on every line and clears `placeOfSupply`/
+`supplyType` on the header. It runs on both create and update, so "no GST" is a
+state the data actually holds rather than a flag someone must remember to
+interpret. `hsnCode` is deliberately kept — it describes what the goods ARE,
+not what tax was charged, and belongs on non-GST paperwork too.
+
+NULL not 0, deliberately: on a tax document a stamped 0 is a positive claim
+that the goods are zero-rated. Same distinction `stampGst` already makes for a
+missing rate.
+
+The two mechanisms are now mutually exclusive at the storage level. A GST
+invoice stores `taxRate: null`. Unticking GST clears `taxRate` **unless the
+same request supplies one** — that is the spec's "explicitly separate non-GST
+tax mechanism", and requiring it in the same breath is what makes it explicit
+rather than a leftover.
+
+**Tests:** `invoices/gst-toggle.test.ts` (new, 8) — GST on (CGST 90 + SGST 90
+on ₹1,000 → ₹1,180); a GST invoice never storing a flat rate; GST off from the
+start; **the reported case** (1180 → 1000, stamps gone from the DB, not merely
+ignored); disabling while explicitly setting 5% (→ 1050, still no stamps); a
+flat rate NOT surviving re-enabling GST (the mirror-image bug); off→on→off→on
+returning the same two figures each time; and `invoiceTotalDecimal` computed
+straight from the row matching the API — one rule, three readers.
+
+## BUG-5 / BUG-6 (P1) — "100 available" on the page, "only 5" at the till
+
+Filed as two bugs (stock inconsistency, POS sale blocked). **One cause.** POS
+needed no change at all.
+
+**Root cause — a gap, not a disagreement.** Two tables can answer "how much can
+we sell": the **ledger** (sum of movements — the immutable record of what we
+own) and **inventory lots** (which physical batch those units belong to). Lots
+are a refinement of the ledger, never a second opinion, so a unit in the ledger
+with no lot is a gap.
+
+The gap opens in exactly one way: a product accumulates stock while
+`tracksBatch` is false, then someone ticks the box. Every unit already on the
+shelf is real, is in the ledger, and belongs to no lot. From that moment the
+Product page reads the ledger and says 100, while `planAllocation` asks the
+lots and finds 5 — and the system tells the user two different things about the
+same shelf, one of which stops them selling goods they own.
+
+Both formulas were already correct and already shared:
+
+    On hand   = every movement, any condition
+    Sellable  = movements with status AVAILABLE
+    Available = Sellable − Reserved        (lib/reservations.ts)
+
+`availableQuantity` is used by the stock list, the movement guard and the issue
+guard alike. Nothing needed redefining — the DATA was incomplete.
+
+**Fix — close the gap at its source, and make it visible if it ever reopens.**
+
+- `ensureBatchCoverage()` (batch.service.ts) creates one `OPENING` lot for any
+  ledger stock no lot accounts for. The quantity is computed FROM the ledger,
+  so lots can only ever be brought up to it, never past it — this can't invent
+  stock. Damaged and quarantined units are excluded, or covering them would
+  make them sellable through the back door. No expiry is set: nobody knows it,
+  and under FEFO a null expiry sorts LAST, so legacy stock is consumed after
+  anything with a known date. Audited as `batch.opening` — inventory rows
+  nobody typed in need a traceable reason.
+- `updateProduct` calls it, under `lockStock`, for every location the moment
+  `tracksBatch` goes false → true. **The gap can no longer open.**
+- `prisma/backfill-opening-batches.ts` repairs products already in that state
+  (report-only by default, `--apply` to write, safe to run twice). The code fix
+  can't heal existing data, and nothing would touch those products again until
+  someone tried to sell them — which is exactly when it hurts.
+  ⚠️ **ACTION FOR MR. RAO: run this against production** —
+  `npx tsx prisma/backfill-opening-batches.ts` to see the damage, then
+  `--apply`.
+- `stockLevels` now also returns `batchAvailable` for batch-tracked products,
+  using the SAME filter `planAllocation` uses (AVAILABLE status, remainder > 0)
+  — one query, not two similar ones that can drift. Product Details shows an
+  amber "only N in batches" chip when it is below `available`, so the page
+  itself reports the gap instead of letting the till break the news.
+- `planAllocation`'s error now distinguishes the two cases. A genuine shortage
+  still says "only N available"; an uncovered ledger says so and names both
+  numbers, because "only 5 available" from a system that just displayed 100 is
+  what gets a system called broken.
+
+**POS was never at fault** and is unchanged. `posSale` composes
+`createInvoice → issueInvoice → recordPayment`, and `issueInvoice` already does
+the guard, the advisory locks, the batch allocation and the `SALE` movement in
+ONE transaction. Verified, not modified. (Its deliberate non-atomicity across
+the three services is also unchanged and still right: the goods are in the
+customer's bag, so a failed payment must not roll back the stock deduction.)
+
+**Tests:** `stock/available-consistency.test.ts` (new, 13) — normal, reserved,
+damaged/quarantined, per-location; then the batch half: **the reported case**
+(95 legacy + 5 batched → page and lots both 100, and the sale that used to fail
+now works); the opening lot being consumed AFTER a dated lot; a sale spanning
+three lots; exactly-available; more-than-available refused with the real
+number; reserved stock not available to POS; damaged lots never picked; POS and
+an ordinary invoice reaching the same position with `batchAvailable ===
+available`; and coverage being per location.
+
+**No migration.** `OPENING` lots are ordinary rows; the backfill script is data
+repair, not a schema change.
+
+### BUG-7 — a failed POS sale left its reservation behind (found BY the tests)
+
+Two of the new tests failed on the first run, and not because they were wrong.
+
+`posSale` creates a draft invoice — which RESERVES its lines — and then issues
+it. If issuing failed (oversell guard, damaged stock, anything), the draft
+stayed behind **still holding the reservation**. A till sale that failed once
+made the shelf permanently short by the amount it had tried to sell. The
+operator retries; the second attempt is blocked by stock the FIRST failed
+attempt is still sitting on. The only symptom is a shop that cannot sell its
+own goods, with no visible cause.
+
+This has been there since POS was built. It is also almost certainly mixed
+into the "not enough stock" reports from testing — some of those may be
+self-inflicted by an earlier failure rather than the batch gap.
+
+**Fix:** `posSale` cancels the draft if issuing throws, then rethrows the
+original error. Rolling back HERE is safe in a way rolling back a payment is
+not, and the distinction is the whole design: when payment fails the goods are
+in the customer's bag, so the deduction is a physical fact and must stand;
+when ISSUING fails no stock moved and nothing left the counter, so there is no
+fact to contradict — only paperwork that never became a sale. Best-effort, so
+a failure to cancel still surfaces the original error and leaves a visible,
+cancellable draft.
+
+Second time this round a WRITE-path test found what read-path tests could not.
+Worth making a habit: every fix gets at least one test that tries to DO the
+forbidden thing, not just look at it.
+
+✅ **Suite green — 32 files, 513 tests** (492 before + 21 new).
