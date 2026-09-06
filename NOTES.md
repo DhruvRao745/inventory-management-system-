@@ -2549,9 +2549,10 @@ guard alike. Nothing needed redefining — the DATA was incomplete.
   (report-only by default, `--apply` to write, safe to run twice). The code fix
   can't heal existing data, and nothing would touch those products again until
   someone tried to sell them — which is exactly when it hurts.
-  ⚠️ **ACTION FOR MR. RAO: run this against production** —
-  `npx tsx prisma/backfill-opening-batches.ts` to see the damage, then
-  `--apply`.
+  ✅ **Run against production 6 Sep 2026.** Exactly one shelf was affected:
+  `S01 @ Main Location — ledger 108, batches 3 → 105 unassigned`, now covered
+  by an OPENING lot. One product, switched to batch tracking after it already
+  held stock — the whole reported symptom, and not a widespread problem.
 - `stockLevels` now also returns `batchAvailable` for batch-tracked products,
   using the SAME filter `planAllocation` uses (AVAILABLE status, remainder > 0)
   — one query, not two similar ones that can drift. Product Details shows an
