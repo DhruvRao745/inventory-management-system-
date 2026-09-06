@@ -178,6 +178,13 @@ export type InvoiceLine = {
   quantity: string;
   unitPrice: string;
 
+  // --- returns (BUG-3), present on GET /invoices/:id ---------------------
+  /** How much of this line has come back. */
+  returnedQuantity?: string;
+  /** quantity − returnedQuantity: what the customer kept. */
+  netQuantity?: string;
+  netLineTotal?: string;
+
   // --- GST, STAMPED at write time (P2-3) --------------------------------
   //
   // Null on every invoice raised before GST, and on flat-rate invoices. These
@@ -259,6 +266,27 @@ export type Invoice = {
   paidAmount?: string;
   balanceAmount?: string;
   paymentStatus?: PaymentStatus;
+
+  // --- returns (BUG-3) ---------------------------------------------------
+  /** Value of goods returned against this invoice, at the invoice's basis. */
+  returnedAmount?: string;
+  /** Money actually handed back. */
+  refundedAmount?: string;
+  /** totalAmount − returnedAmount: what the customer kept. */
+  netTotalAmount?: string;
+  /** paidAmount − refundedAmount: what we are actually holding. */
+  netPaidAmount?: string;
+  /**
+   * Summary of what came back. Derived server-side from the return documents;
+   * the invoice itself is never rewritten.
+   */
+  returned?: {
+    quantity: string;
+    subtotal: string;
+    amount: string;
+    byCondition: { SELLABLE: string; DAMAGED: string; QUARANTINE: string };
+    fullyReturned: boolean;
+  };
 };
 
 export function invNumber(n: number): string {

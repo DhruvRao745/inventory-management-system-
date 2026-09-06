@@ -1227,15 +1227,57 @@ export function InvoiceDetailPage() {
                 )}
               </div>
 
-              {/* The three figures, straight from the server's derivation. */}
+              {/* Returns, shown ABOVE the money so the numbers below make
+                  sense. The invoice total stays what was billed — a sold
+                  invoice is a historical document — and the net figure is
+                  derived from the return records, never by editing history. */}
+              {inv.returned && Number(inv.returned.quantity) > 0 && (
+                <div className="rounded-[5px] border-2 border-[var(--line)] bg-[var(--panel)] p-3">
+                  <div className="flex flex-wrap items-baseline justify-between gap-2">
+                    <span className="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">
+                      Returned{inv.returned.fullyReturned && " · in full"}
+                    </span>
+                    <span className="text-sm font-black text-[var(--text)]">
+                      {formatQty(inv.returned.quantity)} back ·{" "}
+                      {formatMoney(Number(inv.returned.amount), currency)}
+                    </span>
+                  </div>
+                  <div className="mt-1 flex flex-wrap gap-3 text-[10px] font-semibold text-[var(--muted)]">
+                    {(["SELLABLE", "DAMAGED", "QUARANTINE"] as const)
+                      .filter((c) => Number(inv.returned!.byCondition[c]) > 0)
+                      .map((c) => (
+                        <span key={c}>
+                          {formatQty(inv.returned!.byCondition[c])} {c.toLowerCase()}
+                        </span>
+                      ))}
+                    {Number(inv.refundedAmount ?? 0) > 0 && (
+                      <span>
+                        {formatMoney(Number(inv.refundedAmount), currency)} refunded
+                      </span>
+                    )}
+                  </div>
+                </div>
+              )}
+
+              {/* The figures, straight from the server's derivation. */}
               <div className="grid grid-cols-3 gap-3">
                 <div className="rounded-[5px] border-2 border-[var(--line)] bg-[var(--panel)] p-3">
                   <div className="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">
-                    Invoice total
+                    {Number(inv.returnedAmount ?? 0) > 0
+                      ? "Net of returns"
+                      : "Invoice total"}
                   </div>
                   <div className="mt-1 text-lg font-black text-[var(--text)]">
-                    {formatMoney(Number(inv.totalAmount ?? 0), currency)}
+                    {formatMoney(
+                      Number(inv.netTotalAmount ?? inv.totalAmount ?? 0),
+                      currency
+                    )}
                   </div>
+                  {Number(inv.returnedAmount ?? 0) > 0 && (
+                    <div className="text-[10px] font-semibold text-[var(--muted)]">
+                      billed {formatMoney(Number(inv.totalAmount ?? 0), currency)}
+                    </div>
+                  )}
                 </div>
                 <div className="rounded-[5px] border-2 border-[var(--line)] bg-[var(--panel)] p-3">
                   <div className="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">
@@ -1244,6 +1286,12 @@ export function InvoiceDetailPage() {
                   <div className="mt-1 text-lg font-black text-emerald-500">
                     {formatMoney(Number(inv.paidAmount ?? 0), currency)}
                   </div>
+                  {Number(inv.refundedAmount ?? 0) > 0 && (
+                    <div className="text-[10px] font-semibold text-[var(--muted)]">
+                      less {formatMoney(Number(inv.refundedAmount), currency)}{" "}
+                      refunded
+                    </div>
+                  )}
                 </div>
                 <div className="rounded-[5px] border-2 border-[var(--line)] bg-[var(--panel)] p-3">
                   <div className="text-[10px] font-bold uppercase tracking-wide text-[var(--muted)]">

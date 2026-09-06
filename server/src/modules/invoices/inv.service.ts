@@ -5,6 +5,10 @@
  */
 import { Prisma, type InvoiceSource } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
+import {
+  invoiceReturnSummary,
+  netQuantity,
+} from "../../lib/sales-returns.js";
 import { AppError } from "../../middleware/error.js";
 import {
   lockStock,
@@ -623,7 +627,45 @@ export async function getInvoice(companyId: string, id: string) {
       ? summariseStampedGst(inv.lines, inv.supplyType)
       : null;
 
-  return { ...inv, subtotal, gst, ...summarisePayments(total, inv.payments) };
+  // What has come back (BUG-3). DERIVED, never stored: the invoice itself is
+  // a historical document and is not rewritten when a customer returns goods.
+  // Every screen that needs a net figure computes it from the same returns,
+  // so the invoice and the reports cannot drift apart.
+  const returns = await invoiceReturnSummary(prisma, companyId, inv);
+
+  const lines = inv.lines.map((l) => {
+    const returnedQty = returns.quantityByLine.get(l.id);
+    const netQty = netQuantity(l.quantity, returnedQty);
+    return {
+      ...l,
+      /** How much of THIS line came back. */
+      returnedQuantity: returnedQty ?? new Dec(0),
+      /** What the customer kept — quantity minus returns. */
+      netQuantity: netQty,
+      netLineTotal: netQty.times(l.unitPrice).toDecimalPlaces(2),
+    };
+  });
+
+  return {
+    ...inv,
+    lines,
+    subtotal,
+    gst,
+    returned: {
+      quantity: [...returns.quantityByLine.values()].reduce(
+        (s, q) => s.plus(q),
+        new Dec(0)
+      ),
+      subtotal: returns.returnedSubtotal.toDecimalPlaces(2),
+      amount: returns.returnedAmount,
+      byCondition: returns.quantityByCondition,
+      fullyReturned: returns.fullyReturned,
+    },
+    ...summarisePayments(total, inv.payments, {
+      returnedAmount: returns.returnedAmount,
+      refundedAmount: returns.refundedAmount,
+    }),
+  };
 }
 
 export async function updateInvoice(

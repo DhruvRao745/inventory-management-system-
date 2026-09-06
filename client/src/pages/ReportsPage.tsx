@@ -104,7 +104,17 @@ type ReorderRow = {
   preferredSupplier: { id: string; name: string } | null;
 };
 type SalesReport = {
-  totals: { revenue: number; invoices: number };
+  /**
+   * `revenue` is NET of returns (BUG-3) — the same basis as the invoice
+   * screen. `returned` and `grossRevenue` are carried alongside so the
+   * reduction is visible rather than a number that quietly shrank.
+   */
+  totals: {
+    revenue: number;
+    returned: number;
+    grossRevenue: number;
+    invoices: number;
+  };
   byProduct: {
     productId: string;
     name: string;
@@ -1233,11 +1243,18 @@ export function ReportsPage() {
             <div className="grid grid-cols-2 gap-4">
               <div className={`${cardClass} p-4`}>
                 <div className="text-xs font-bold uppercase tracking-wide text-[var(--muted)]">
-                  Revenue
+                  Revenue{sales.totals.returned > 0 && " (net)"}
                 </div>
                 <div className="mt-1 text-2xl font-black tracking-tight text-[var(--accent)]">
                   {formatMoney(sales.totals.revenue, currency, 0)}
                 </div>
+                {sales.totals.returned > 0 && (
+                  <div className="text-[10px] font-semibold text-[var(--muted)]">
+                    {formatMoney(sales.totals.grossRevenue, currency, 0)} billed
+                    less {formatMoney(sales.totals.returned, currency, 0)}{" "}
+                    returned
+                  </div>
+                )}
               </div>
               <div className={`${cardClass} p-4`}>
                 <div className="text-xs font-bold uppercase tracking-wide text-[var(--muted)]">

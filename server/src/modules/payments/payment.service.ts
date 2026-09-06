@@ -28,6 +28,11 @@
  */
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
+import {
+  invoiceReturnSummary,
+  loadSettledReturns,
+  summariseInvoiceReturns,
+} from "../../lib/sales-returns.js";
 import { AppError } from "../../middleware/error.js";
 import { lockDocument, LOCKED_TX_OPTIONS } from "../../lib/locks.js";
 import { recordAudit } from "../../lib/audit.js";
@@ -87,6 +92,10 @@ export async function paymentSummaryFor(
       discount: true,
       lines: {
           select: {
+            // id + productId let return lines be matched back to the invoice
+            // line they came off (BUG-3).
+            id: true,
+            productId: true,
             quantity: true,
             unitPrice: true,
             // Stamped GST (P2-3) — needed so invoiceTotal can SUM the tax
@@ -101,7 +110,20 @@ export async function paymentSummaryFor(
     },
   });
   if (!inv) throw new AppError(404, "Invoice not found");
-  return summarisePayments(invoiceTotal(inv), inv.payments);
+  // Returns reduce what is still collectable (BUG-3). Without this a customer
+  // who returned half the order could still be chased for — and allowed to
+  // pay — the full original amount.
+  const returns = await invoiceReturnSummary(tx, companyId, {
+    id: invoiceId,
+    taxMode: inv.taxMode,
+    taxRate: inv.taxRate,
+    discount: inv.discount,
+    lines: inv.lines,
+  });
+  return summarisePayments(invoiceTotal(inv), inv.payments, {
+    returnedAmount: returns.returnedAmount,
+    refundedAmount: returns.refundedAmount,
+  });
 }
 
 /**
@@ -318,6 +340,8 @@ export async function outstandingBalances(companyId: string) {
       discount: true,
       lines: {
           select: {
+            id: true,
+            productId: true,
             quantity: true,
             unitPrice: true,
             // Stamped GST (P2-3) — needed so invoiceTotal can SUM the tax
@@ -333,9 +357,23 @@ export async function outstandingBalances(companyId: string) {
     orderBy: { number: "desc" },
   });
 
+  // Returns for every invoice in one read, not one per row (BUG-3).
+  const returnsByInvoice = await loadSettledReturns(
+    prisma,
+    companyId,
+    invoices.map((i) => i.id)
+  );
+
   const rows = invoices
     .map((inv) => {
-      const s = summarisePayments(invoiceTotal(inv), inv.payments);
+      const bucket = returnsByInvoice.get(inv.id);
+      const ret = bucket
+        ? summariseInvoiceReturns(inv, bucket.lines, bucket.refunds)
+        : null;
+      const s = summarisePayments(invoiceTotal(inv), inv.payments, {
+        returnedAmount: ret?.returnedAmount,
+        refundedAmount: ret?.refundedAmount,
+      });
       return {
         invoiceId: inv.id,
         number: inv.number,
@@ -343,6 +381,10 @@ export async function outstandingBalances(companyId: string) {
         issuedAt: inv.issuedAt,
         totalAmount: Number(s.totalAmount),
         paidAmount: Number(s.paidAmount),
+        // What they still owe AFTER anything they sent back.
+        returnedAmount: Number(s.returnedAmount),
+        refundedAmount: Number(s.refundedAmount),
+        netTotalAmount: Number(s.netTotalAmount),
         balanceAmount: Number(s.balanceAmount),
         paymentStatus: s.paymentStatus,
       };

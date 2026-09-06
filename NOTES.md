@@ -2341,3 +2341,108 @@ company-wide against the product default. It answers "which products need
 attention", not "which shelves" — the per-shelf question is the reorder
 report's job. Mixing a location minimum into a company-wide total is the exact
 error PRD §11 describes, so it now shares only the zero rule.
+
+## BUG-3 (P1) — sales returns stopped at the warehouse door
+
+**Reported:** a return against INV-0002 sent back 5 pieces with ₹500 refunded.
+The Returns page showed it, inventory moved correctly (sellable/damaged split
+included), and **nothing else changed**. The invoice never mentioned it and
+every report still counted the full sale. The same five units were
+simultaneously back on our shelf and still sold.
+
+**Root cause — nothing read the returns.** The return data was complete and
+correct the whole time; it had no consumers. Traced end to end:
+
+| Stage | Before |
+|---|---|
+| Sale → Invoice | fine |
+| Return → stock | fine — `RETURN_IN` movements, status from the condition |
+| Return → COGS | fine — `costReturnIn` puts value back at the cost it left at |
+| Return → **invoice** | ❌ `getInvoice` never looked at returns |
+| Refund → **balance** | ❌ `summarisePayments` knew only invoice total − payments |
+| Return → **revenue** | ❌ `/sales`, `/profitability`, `/summary` all gross |
+| Return → **COGS reporting** | ❌ only `SALE` movements summed; `RETURN_IN` ignored |
+
+So this was one bug with six faces, not six bugs.
+
+**Source of truth, stated once** (`server/src/lib/sales-returns.ts`):
+
+| Value | Comes from |
+|---|---|
+| what was sold | `Invoice` + `InvoiceLine` — immutable, never edited |
+| what came back | `SalesReturnLine` (quantity + condition) |
+| what it was worth | `InvoiceLine.unitPrice` — the price it sold at |
+| what we paid back | `SalesReturn.refundAmount` |
+| where the stock went | `StockMovement` `RETURN_IN`, status = condition |
+| what it cost us | `StockMovement.costAtTime` |
+
+**The invoice is never rewritten.** A sold invoice is a historical document;
+net figures are DERIVED on every read. That is precisely why the invoice and
+the reports can no longer disagree — there is nothing stored to fall out of
+step. (Requirement 1 is satisfied by construction, not by discipline.)
+
+**Which returns count: RECEIVED and REFUNDED**, the two states where the goods
+are physically back. A REQUESTED or APPROVED return is a conversation — no
+stock has moved, so reversing revenue would report a sale as undone while the
+goods are still at the customer's house. This deliberately matches the ledger,
+which also moves at RECEIVED. (The double-return guard still counts every
+non-cancelled return: "may this be sent back?" must be pessimistic, "what has
+come back?" must be factual. Different questions, different answers.)
+
+**Value is scaled to the invoice's own basis.** A line's raw value is
+quantity × unitPrice, but the customer paid the invoice TOTAL — after discount,
+plus tax. Returned value is therefore scaled by the line's share of the
+subtotal, exactly as the sales report already spreads discount and tax. Without
+that, a return against a discounted invoice would credit back more than was
+ever charged.
+
+**Money, restated.** `summarisePayments` gained an optional returns argument
+(defaulted, so every existing caller is byte-identical):
+
+    netTotal = total − returned          what the customer keeps
+    netPaid  = paid  − refunded          what we are actually holding
+    balance  = netTotal − netPaid        + they owe us / − WE OWE THEM
+
+A negative balance is now expressible, and it is exactly what an accepted but
+un-refunded return looks like. Payment is capped at the net balance, so a
+customer who returned half an order can no longer be billed — or allowed to
+pay — the full amount. Payment status is judged on the net figures, so a fully
+returned and refunded invoice reads as settled rather than as an unpaid ₹500.
+
+**Wired into:** `getInvoice` (per-line `returnedQuantity`/`netQuantity`, plus a
+`returned` block with the condition split), `paymentSummaryFor`,
+`outstandingBalances`, `/reports/sales`, `/reports/profitability` and the
+dashboard `/summary` (revenue, COGS, top sellers and outstanding all net).
+
+**COGS reverses at the cost the goods LEFT at.** `RETURN_IN` carries the
+original `costAtTime`, so subtracting it unwinds the original charge exactly.
+Recomputing at today's average would leak a profit or a loss out of a customer
+changing their mind. Both sides are events in the reporting window, on purpose:
+matching a return back to the month its invoice was raised would silently
+restate closed months.
+
+**Files:** `lib/sales-returns.ts` (new) · `lib/money.ts` · `invoices/inv.service.ts` ·
+`payments/payment.service.ts` · `reports/report.routes.ts` ·
+`client/src/lib/types.ts` · `client/src/pages/InvoiceDetailPage.tsx` ·
+`client/src/pages/ReportsPage.tsx`
+
+**Tests:** `returns/reconciliation.test.ts` (new, 12). Each asserts the
+invoice, the money AND the ledger together — a fix that satisfies one of the
+three is the bug in a different hat. Covers: no return (the control); partial
+return + refund (the reported case, ₹500 → ₹250 net, balance 0, stock 95);
+damaged partial (value reverses, sellable stock does not — owned 94, sellable
+90); quarantined; multiple partial returns accumulating; full return (net sale
+zero, stock 100, profit 0); COGS reversing at the original cost even after a
+dearer delivery moves the average; unpaid invoice leaving only the kept goods
+owing; **paid invoice with an un-refunded return showing −₹200**; payment
+capped at the net balance; the outstanding report agreeing with the invoice;
+and a REQUESTED return reversing nothing.
+
+**No migration.** Every figure is derived from rows that already existed.
+
+**Deliberately unchanged:** `syncInvoiceStatus` still sets ISSUED/PAID from the
+gross payments — a fully refunded invoice stays PAID because the money did
+arrive; the net position is carried by `paymentStatus` and `balanceAmount`.
+Analytics (turnover, ABC, forecasting) still reads `SALE` movements, since it
+measures demand and throughput rather than revenue; whether a return should
+reduce forecast demand is a product question, not a bug.

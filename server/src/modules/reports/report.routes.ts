@@ -14,6 +14,10 @@ import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 import { isLowStock } from "../../lib/low-stock.js";
+import {
+  loadSettledReturns,
+  summariseInvoiceReturns,
+} from "../../lib/sales-returns.js";
 import { asyncHandler, AppError } from "../../middleware/error.js";
 import { requireAuth, type AuthRequest } from "../../middleware/auth.js";
 import { grandTotal } from "../invoices/inv.service.js";
@@ -399,15 +403,33 @@ reportsRouter.get(
       },
     });
 
+    // What came back against these invoices (BUG-3). Revenue reported gross
+    // while goods sat back on our own shelf was the reconciliation failure —
+    // the sale and the return were both true and never met.
+    const returnsByInvoice = await loadSettledReturns(
+      prisma,
+      companyId,
+      invoices.map((i) => i.id)
+    );
+
     const byProduct = new Map<
       string,
-      { productId: string; name: string; unit: string; units: number; revenue: number }
+      {
+        productId: string;
+        name: string;
+        unit: string;
+        units: number;
+        revenue: number;
+        returnedUnits: number;
+        returnedRevenue: number;
+      }
     >();
     const byCustomer = new Map<
       string,
       { name: string; invoices: number; revenue: number }
     >();
     let totalRevenue = 0;
+    let totalReturned = 0;
 
     for (const inv of invoices) {
       const subtotal = Number(
@@ -416,6 +438,10 @@ reportsRouter.get(
           new Prisma.Decimal(0)
         )
       );
+      const bucket = returnsByInvoice.get(inv.id);
+      const returns = bucket
+        ? summariseInvoiceReturns(inv, bucket.lines, bucket.refunds)
+        : null;
       // The ACTUAL money for this invoice — after discount, plus tax — same
       // as the invoice total the customer sees.
       //
@@ -424,7 +450,10 @@ reportsRouter.get(
       // from the invoices it is supposed to summarise, and the two would never
       // reconcile.
       const invTotal = Number(invoiceTotalDecimal(inv));
-      totalRevenue += invTotal;
+      // NET revenue: billed minus what came back, at the same basis.
+      const invReturned = Number(returns?.returnedAmount ?? 0);
+      totalRevenue += invTotal - invReturned;
+      totalReturned += invReturned;
 
       const c = byCustomer.get(inv.customerName) ?? {
         name: inv.customerName,
@@ -432,7 +461,7 @@ reportsRouter.get(
         revenue: 0,
       };
       c.invoices += 1;
-      c.revenue += invTotal;
+      c.revenue += invTotal - invReturned;
       byCustomer.set(inv.customerName, c);
 
       for (const l of inv.lines) {
@@ -440,23 +469,48 @@ reportsRouter.get(
         // Spread the invoice's discount/tax across lines by their share of
         // the subtotal, so per-product revenue sums back to the invoice total.
         const rev = subtotal > 0 ? invTotal * (lineSub / subtotal) : 0;
+
+        // The returned slice of this line, valued on exactly the same basis —
+        // so "units" and "revenue" stay two views of one number.
+        const retQty = Number(returns?.quantityByLine.get(l.id) ?? 0);
+        const retSub = retQty * Number(l.unitPrice);
+        const retRev = subtotal > 0 ? invTotal * (retSub / subtotal) : 0;
+
         const p = byProduct.get(l.productId) ?? {
           productId: l.productId,
           name: l.product.name,
           unit: l.product.unit,
           units: 0,
           revenue: 0,
+          returnedUnits: 0,
+          returnedRevenue: 0,
         };
-        p.units += Number(l.quantity);
-        p.revenue += rev;
+        // NET units sold: a partial return reduces what was sold, it does not
+        // sit beside it as a separate fact nobody adds up.
+        p.units += Number(l.quantity) - retQty;
+        p.revenue += rev - retRev;
+        p.returnedUnits += retQty;
+        p.returnedRevenue += retRev;
         byProduct.set(l.productId, p);
       }
     }
 
     res.json({
-      totals: { revenue: round2(totalRevenue), invoices: invoices.length },
+      totals: {
+        // `revenue` is NET of returns — the figure every other screen shows.
+        revenue: round2(totalRevenue),
+        // Kept alongside so the reduction is visible rather than mysterious.
+        returned: round2(totalReturned),
+        grossRevenue: round2(totalRevenue + totalReturned),
+        invoices: invoices.length,
+      },
       byProduct: [...byProduct.values()]
-        .map((p) => ({ ...p, revenue: round2(p.revenue) }))
+        .map((p) => ({
+          ...p,
+          revenue: round2(p.revenue),
+          returnedUnits: round2(p.returnedUnits),
+          returnedRevenue: round2(p.returnedRevenue),
+        }))
         .sort((a, b) => b.revenue - a.revenue),
       byCustomer: [...byCustomer.values()]
         .map((c) => ({ ...c, revenue: round2(c.revenue) }))
@@ -525,6 +579,32 @@ reportsRouter.get(
       select: { productId: true, quantity: true, costAtTime: true },
     });
 
+    // ...and returns come back out of it the same way (BUG-3). costReturnIn
+    // puts the goods back at the cost they LEFT at, so subtracting the
+    // RETURN_IN movement's own costAtTime unwinds the original charge exactly.
+    // Recomputing from today's average would leak a profit or a loss out of a
+    // customer simply changing their mind.
+    //
+    // Both sides are events in the window, deliberately: a period's profit is
+    // what happened in that period. Matching a return back to the month its
+    // invoice was raised would silently restate closed months.
+    const returnMovements = await prisma.stockMovement.findMany({
+      where: {
+        companyId,
+        type: "RETURN_IN",
+        createdAt: { gte: fromDate, lte: toDate },
+      },
+      select: { productId: true, quantity: true, costAtTime: true },
+    });
+
+    // Returned VALUE, per product, from the returns themselves — the same
+    // source the invoice screen and the sales report read.
+    const returnsByInvoice = await loadSettledReturns(
+      prisma,
+      companyId,
+      invoices.map((i) => i.id)
+    );
+
     type Row = {
       productId: string;
       sku: string;
@@ -532,23 +612,48 @@ reportsRouter.get(
       revenue: Prisma.Decimal;
       cogs: Prisma.Decimal;
       unitsSold: Prisma.Decimal;
+      /** Value returned against this product in the window (BUG-3). */
+      returnedRevenue: Prisma.Decimal;
     };
     const byProduct = new Map<string, Row>();
     const zero = () => new Prisma.Decimal(0);
 
+    const blankRow = (productId: string, sku: string, name: string): Row => ({
+      productId,
+      sku,
+      name,
+      revenue: zero(),
+      cogs: zero(),
+      unitsSold: zero(),
+      returnedRevenue: zero(),
+    });
+
     for (const inv of invoices) {
+      const bucket = returnsByInvoice.get(inv.id);
+      const returns = bucket
+        ? summariseInvoiceReturns(inv, bucket.lines, bucket.refunds)
+        : null;
+      const subtotal = inv.lines.reduce(
+        (s, l) => s.plus(l.unitPrice.times(l.quantity)),
+        new Prisma.Decimal(0)
+      );
+
       for (const l of inv.lines) {
         const row =
           byProduct.get(l.productId) ??
-          {
-            productId: l.productId,
-            sku: l.product.sku,
-            name: l.product.name,
-            revenue: zero(),
-            cogs: zero(),
-            unitsSold: zero(),
-          };
+          blankRow(l.productId, l.product.sku, l.product.name);
         row.revenue = row.revenue.plus(l.unitPrice.times(l.quantity));
+
+        // Value returned off this line, at the price it sold for. This report
+        // works on line subtotals (not invoice totals), so the returned slice
+        // is measured the same way — mixing the two bases is how a "net"
+        // figure ends up agreeing with nothing.
+        const retQty = returns?.quantityByLine.get(l.id);
+        if (retQty && subtotal.greaterThan(0)) {
+          row.returnedRevenue = row.returnedRevenue.plus(
+            retQty.times(l.unitPrice)
+          );
+        }
         byProduct.set(l.productId, row);
       }
     }
@@ -561,6 +666,20 @@ reportsRouter.get(
       if (m.costAtTime) row.cogs = row.cogs.plus(qty.times(m.costAtTime));
     }
 
+    for (const m of returnMovements) {
+      const row = byProduct.get(m.productId);
+      if (!row) continue; // returned against a sale outside this window
+      const qty = m.quantity.abs();
+      // Net units sold falls, and the cost of those units comes back out.
+      row.unitsSold = row.unitsSold.minus(qty);
+      if (m.costAtTime) row.cogs = row.cogs.minus(qty.times(m.costAtTime));
+    }
+
+    // Net the revenue AFTER both passes, so the subtraction happens once.
+    for (const row of byProduct.values()) {
+      row.revenue = row.revenue.minus(row.returnedRevenue);
+    }
+
     const rows = [...byProduct.values()]
       .map((r) => {
         const { profit, margin } = grossProfit(r.revenue, r.cogs);
@@ -568,8 +687,11 @@ reportsRouter.get(
           productId: r.productId,
           sku: r.sku,
           name: r.name,
+          // NET of returns, all three — gross profit is then computed from
+          // net revenue and net COGS, as PRD §7 requires.
           unitsSold: Number(r.unitsSold),
           revenue: Number(r.revenue.toDecimalPlaces(2)),
+          returnedRevenue: Number(r.returnedRevenue.toDecimalPlaces(2)),
           cogs: Number(r.cogs.toDecimalPlaces(2)),
           grossProfit: Number(profit),
           margin: Number(margin),
@@ -1156,6 +1278,7 @@ reportsRouter.get(
       openPOs,
       expiringBatches,
       soldInPeriod,
+      returnedInPeriod,
     ] = await Promise.all([
       // Inventory value: every condition, because we own damaged stock too.
       prisma.stockMovement.groupBy({
@@ -1214,6 +1337,11 @@ reportsRouter.get(
         where: { companyId, type: "SALE", createdAt: range },
         select: { productId: true, quantity: true, costAtTime: true },
       }),
+      // ...and what came back in the window, which unwinds both (BUG-3).
+      prisma.stockMovement.findMany({
+        where: { companyId, type: "RETURN_IN", createdAt: range },
+        select: { productId: true, quantity: true, costAtTime: true },
+      }),
     ]);
 
     const productById = new Map(products.map((p) => [p.id, p]));
@@ -1244,25 +1372,59 @@ reportsRouter.get(
     }
 
     // --- revenue, COGS, gross profit ------------------------------------
-    const revenue = periodInvoices.reduce(
-      (s, inv) => s.plus(invoiceTotalDecimal(inv)),
-      zero
+    // Returns settled against the window's invoices, from the returns data
+    // itself — the same source the invoice screen and the sales report use.
+    const periodReturns = await loadSettledReturns(
+      prisma,
+      companyId,
+      periodInvoices.map((i) => i.id)
     );
+    const returnedRevenue = periodInvoices.reduce((s, inv) => {
+      const bucket = periodReturns.get(inv.id);
+      if (!bucket) return s;
+      return s.plus(
+        summariseInvoiceReturns(inv, bucket.lines, bucket.refunds).returnedAmount
+      );
+    }, zero);
+
+    // NET revenue. Reporting the gross figure while the goods sit back on our
+    // own shelf is the reconciliation failure this fix is about.
+    const revenue = periodInvoices
+      .reduce((s, inv) => s.plus(invoiceTotalDecimal(inv)), zero)
+      .minus(returnedRevenue);
 
     // COGS from costAtTime — the cost stamped on each sale when it happened,
     // not today's average. This is what keeps March's profit fixed after an
-    // expensive April delivery (P1-3).
-    const cogs = soldInPeriod.reduce(
-      (s, m) => s.plus(m.quantity.abs().times(m.costAtTime ?? zero)),
-      zero
-    );
+    // expensive April delivery (P1-3). RETURN_IN movements carry the cost the
+    // goods LEFT at, so subtracting them unwinds the original charge exactly.
+    const cogs = soldInPeriod
+      .reduce((s, m) => s.plus(m.quantity.abs().times(m.costAtTime ?? zero)), zero)
+      .minus(
+        returnedInPeriod.reduce(
+          (s, m) => s.plus(m.quantity.abs().times(m.costAtTime ?? zero)),
+          zero
+        )
+      );
 
     // --- outstanding customer balance ------------------------------------
     let outstandingCustomer = zero;
+    const openReturns = await loadSettledReturns(
+      prisma,
+      companyId,
+      openInvoices.map((i) => i.id)
+    );
     for (const inv of openInvoices) {
       const total = invoiceTotalDecimal(inv);
       const paid = inv.payments.reduce((s, p) => s.plus(p.amount), zero);
-      const balance = total.minus(paid);
+      const bucket = openReturns.get(inv.id);
+      const ret = bucket
+        ? summariseInvoiceReturns(inv, bucket.lines, bucket.refunds)
+        : null;
+      // Chasing a customer for goods they sent back is the most visible way
+      // this bug reached a real person.
+      const balance = total
+        .minus(ret?.returnedAmount ?? zero)
+        .minus(paid.minus(ret?.refundedAmount ?? zero));
       if (balance.greaterThan(0)) outstandingCustomer = outstandingCustomer.plus(balance);
     }
 
@@ -1311,7 +1473,14 @@ reportsRouter.get(
         (soldByProduct.get(m.productId) ?? zero).plus(m.quantity.abs())
       );
     }
+    // Net units: a product half of which came back is not a top seller.
+    for (const m of returnedInPeriod) {
+      const current = soldByProduct.get(m.productId);
+      if (!current) continue; // returned against a sale outside this window
+      soldByProduct.set(m.productId, current.minus(m.quantity.abs()));
+    }
     const topProducts = [...soldByProduct.entries()]
+      .filter(([, units]) => units.greaterThan(0))
       .map(([productId, units]) => {
         const p = productById.get(productId);
         return p

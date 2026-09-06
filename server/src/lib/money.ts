@@ -111,8 +111,25 @@ export function lineSubtotal(
 export type PaymentStatus = "UNPAID" | "PARTIAL" | "PAID" | "OVERPAID";
 
 export type PaymentSummary = {
+  /** The invoice as issued. Historical fact — never reduced by a return. */
   totalAmount: Decimal;
+  /** Money that came IN. Also historical — a refund is not an un-payment. */
   paidAmount: Decimal;
+
+  // --- returns (BUG-3) --------------------------------------------------
+  /** Value of goods returned, at this invoice's own basis. */
+  returnedAmount: Decimal;
+  /** Money handed back to the customer. */
+  refundedAmount: Decimal;
+  /** totalAmount − returnedAmount: what the customer actually keeps. */
+  netTotalAmount: Decimal;
+  /** paidAmount − refundedAmount: what we are actually holding. */
+  netPaidAmount: Decimal;
+
+  /**
+   * netTotal − netPaid. Positive = they owe us; NEGATIVE = we owe them, which
+   * is what an accepted return that hasn't been refunded yet looks like.
+   */
   balanceAmount: Decimal;
   paymentStatus: PaymentStatus;
 };
@@ -132,23 +149,54 @@ export type PaymentSummary = {
  */
 export function summarisePayments(
   totalAmount: Decimal,
-  payments: { amount: Decimal }[]
+  payments: { amount: Decimal }[],
+  /**
+   * Returns settled against this invoice (BUG-3). Omitted where an invoice
+   * cannot have returns yet — the defaults make this a no-op, so every
+   * existing caller behaves exactly as before.
+   */
+  returns: { returnedAmount?: Decimal; refundedAmount?: Decimal } = {}
 ): PaymentSummary {
   const paidAmount = payments
     .reduce((s, p) => s.plus(p.amount), new D(0))
     .toDecimalPlaces(2);
-  const balanceAmount = totalAmount.minus(paidAmount).toDecimalPlaces(2);
 
+  const returnedAmount = (returns.returnedAmount ?? new D(0)).toDecimalPlaces(2);
+  const refundedAmount = (returns.refundedAmount ?? new D(0)).toDecimalPlaces(2);
+
+  // The invoice and the payments stay as they happened; what the customer
+  // OWES is derived. Editing either to "apply" a return would destroy the
+  // record of what was billed and what was collected.
+  const netTotalAmount = totalAmount.minus(returnedAmount).toDecimalPlaces(2);
+  const netPaidAmount = paidAmount.minus(refundedAmount).toDecimalPlaces(2);
+  const balanceAmount = netTotalAmount.minus(netPaidAmount).toDecimalPlaces(2);
+
+  // Status is judged on the NET figures, because that is the question being
+  // asked: is this settled? A fully returned and refunded invoice is settled,
+  // even though both gross numbers are large.
   let paymentStatus: PaymentStatus;
-  if (paidAmount.isZero()) {
+  if (netTotalAmount.lessThanOrEqualTo(0) && balanceAmount.lessThanOrEqualTo(0)) {
+    // Nothing left to collect — the sale was fully unwound.
+    paymentStatus = "PAID";
+  } else if (netPaidAmount.lessThanOrEqualTo(0)) {
     paymentStatus = "UNPAID";
-  } else if (paidAmount.lessThan(totalAmount)) {
+  } else if (netPaidAmount.lessThan(netTotalAmount)) {
     paymentStatus = "PARTIAL";
-  } else if (paidAmount.equals(totalAmount)) {
+  } else if (netPaidAmount.equals(netTotalAmount)) {
     paymentStatus = "PAID";
   } else {
+    // We are holding more of their money than the net sale justifies.
     paymentStatus = "OVERPAID";
   }
 
-  return { totalAmount, paidAmount, balanceAmount, paymentStatus };
+  return {
+    totalAmount,
+    paidAmount,
+    returnedAmount,
+    refundedAmount,
+    netTotalAmount,
+    netPaidAmount,
+    balanceAmount,
+    paymentStatus,
+  };
 }
