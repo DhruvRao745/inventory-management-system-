@@ -177,6 +177,10 @@ export async function recordPayment(
         discount: true,
         lines: {
           select: {
+            // id + productId let return lines be matched back to the invoice
+            // line they came off (BUG-3).
+            id: true,
+            productId: true,
             quantity: true,
             unitPrice: true,
             // Stamped GST (P2-3) — needed so invoiceTotal can SUM the tax
@@ -201,11 +205,35 @@ export async function recordPayment(
     }
 
     const total = invoiceTotal(inv);
-    const before = summarisePayments(total, inv.payments);
+
+    // Returns are part of the balance, so they must be read INSIDE the lock,
+    // beside the payments — not derived afterwards. This function computes
+    // its own summary rather than calling paymentSummaryFor because it needs
+    // the before-and-after pair from one read; that made it the one place
+    // where the returns-aware balance could still be bypassed, which is
+    // exactly what the test caught.
+    const settled = await invoiceReturnSummary(tx, companyId, {
+      id: inv.id,
+      taxMode: inv.taxMode,
+      taxRate: inv.taxRate,
+      discount: inv.discount,
+      lines: inv.lines,
+    });
+    const netOf = {
+      returnedAmount: settled.returnedAmount,
+      refundedAmount: settled.refundedAmount,
+    };
+
+    const before = summarisePayments(total, inv.payments, netOf);
     const amount = new Prisma.Decimal(input.amount).toDecimalPlaces(2);
 
     if (before.balanceAmount.lessThanOrEqualTo(0)) {
-      throw new AppError(409, "This invoice is already fully paid");
+      throw new AppError(
+        409,
+        settled.returnedAmount.greaterThan(0)
+          ? "Nothing further is owed on this invoice once returns are accounted for"
+          : "This invoice is already fully paid"
+      );
     }
     if (amount.greaterThan(before.balanceAmount)) {
       throw new AppError(
@@ -228,7 +256,7 @@ export async function recordPayment(
       include: paymentInclude,
     });
 
-    const after = summarisePayments(total, [...inv.payments, { amount }]);
+    const after = summarisePayments(total, [...inv.payments, { amount }], netOf);
     await syncInvoiceStatus(tx, inv.id, after);
 
     await recordAudit(tx, {

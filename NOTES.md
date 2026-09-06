@@ -2438,6 +2438,23 @@ owing; **paid invoice with an un-refunded return showing −₹200**; payment
 capped at the net balance; the outstanding report agreeing with the invoice;
 and a REQUESTED return reversing nothing.
 
+**The bug the tests caught in the fix itself.** The first run failed one test
+of twelve: "payment is capped at the NET balance". `recordPayment` does NOT
+call `paymentSummaryFor` — it computes its own before/after summaries inline,
+because it needs both from a single read taken inside the document lock. The
+shared path was returns-aware; that one was not. So every *display* of the
+balance was correct while the *guard that actually protects the money* was
+still gross — the worse half to miss. Fixed by reading the returns inside the
+same lock and feeding both summaries; the "already fully paid" message now
+distinguishes a balance cleared by returns.
+
+Worth remembering: that was the only one of the twelve tests exercising a
+WRITE path. The other eleven passed with the hole wide open, because reading a
+corrected number and being PREVENTED from doing the wrong thing are different
+guarantees, and a read-only test suite only proves the first.
+
+✅ **Suite green — 30 files, 492 tests** (480 before + the 12 new ones).
+
 **No migration.** Every figure is derived from rows that already existed.
 
 **Deliberately unchanged:** `syncInvoiceStatus` still sets ISSUED/PAID from the
