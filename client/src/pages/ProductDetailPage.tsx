@@ -207,7 +207,17 @@ export function ProductDetailPage() {
               Alert below
             </div>
             <div className="font-black text-[var(--text)]">
-              {product.lowStockThreshold.toLocaleString()}
+              {/* 0 is an OFF SWITCH, not a threshold of zero. Printing a bare
+                  "0" is what made "Alert: 0" sit next to a red "low" badge and
+                  look like a contradiction. */}
+              {qtyNum(product.lowStockThreshold) > 0
+                ? formatQty(product.lowStockThreshold, product.unit)
+                : "Off"}
+            </div>
+            <div className="text-[10px] font-semibold text-[var(--muted)]">
+              {qtyNum(product.lowStockThreshold) > 0
+                ? "default — a location can set its own"
+                : "no alerts unless a location sets its own"}
             </div>
           </div>
         </div>
@@ -270,6 +280,20 @@ export function ProductDetailPage() {
                             haven't got. */}
                         {formatQty(l.available, product.unit)} available
                         {l.lowStock && " · low!"}
+                      </span>
+                      {/* The number the badge was judged against, shown next
+                          to the badge itself. A location that sets its own
+                          minimum REPLACES the product default here, so saying
+                          which one applied is the difference between a
+                          trustworthy screen and an argument. */}
+                      <span className="text-[10px] font-semibold text-[var(--muted)]">
+                        {qtyNum(l.threshold) > 0
+                          ? `alert below ${formatQty(l.threshold, product.unit)}${
+                              l.thresholdSource === "location"
+                                ? " · this location"
+                                : ""
+                            }`
+                          : "alerts off"}
                       </span>
                       {/* Shown whenever there is ANY stock here — not only
                           when something is already blocked. Marking good stock

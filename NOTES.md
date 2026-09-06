@@ -2259,3 +2259,78 @@ doesn't send them — out of scope for this bug, worth their own ticket):
 `expiryDate`. **Expiry is the one that matters**: FEFO sorts by expiry, and a
 lot received without one sorts last, so batch-tracked perishables can't
 currently be given their expiry date at the point of receipt.
+
+## BUG-2 (P1) — "Alert: 0" next to a red "low" badge
+
+**Reported:** Product Details showed total stock 105 pcs, one location holding
+5 pcs, that location badged **low**, and the product's **Alert: 0**. The
+configuration on screen and the behaviour beside it disagreed.
+
+**Root cause — the rule was written three times and the copies had drifted.**
+
+| Where | Threshold used | Zero rule | Location minimum |
+|---|---|---|---|
+| `reorder.service.ts` (reorder report) | `setting.minQuantity ?? product.lowStockThreshold` | ✅ 0 = don't track | ✅ respected |
+| `stock.service.ts` `stockLevels` (Stock page, dashboard card, nav badge, **Product Details location row**) | product default only | ❌ **missing** | ❌ **ignored** |
+| `stock.service.ts` movement alert + `report.routes.ts` dashboard summary | product default only | ✅ | ❌ ignored |
+
+Two separate defects came out of that middle row:
+
+1. **No zero guard.** Everywhere else a threshold of 0 means *alerts are off
+   for this product* — an off switch, deliberately, so untouched products
+   don't bury the real warnings. `stockLevels` read it as *warn me at zero*,
+   so `available (0) ≤ threshold (0)` was true and the shelf went red. That is
+   the reported screen exactly: alerts off, badge lit.
+2. **`ProductLocationSetting.minQuantity` ignored.** The model exists
+   precisely because a company-wide number can't describe two different
+   shelves (PRD §11, and the comment sitting on the model). Every screen that
+   read `stockLevels` ignored it, so setting a location minimum changed the
+   reorder report and nothing a user could see on the product.
+
+**Fix — one rule, in one file: `server/src/lib/low-stock.ts`.**
+
+`effectiveThreshold(productThreshold, locationMin)` — a location minimum
+**replaces** the product default, never adds to it.
+`isLowStock(quantity, threshold)` — `threshold > 0 && quantity <= threshold`.
+
+What is deliberately NOT in the helper is *which quantity to compare*, because
+the two callers legitimately differ and hiding that would be a lie: the
+screens judge **available** (damaged and reserved stock can't fill an order),
+the reorder report judges **on hand** (you don't buy more of what you already
+own). The caller passes what it means.
+
+Wired through all four call sites: `stockLevels`, the movement alert (now
+reads the shelf's own minimum too), the dashboard summary, and the reorder
+report. Only `stockLevels` changes behaviour; the other three were already
+consistent with the helper and now simply share it, so they can't drift again.
+
+**The screen can no longer disagree with itself.** `stockLevels` returns the
+threshold it actually used, plus `thresholdSource: "product" | "location"`.
+Product Details prints it next to each location badge ("alert below 50 · this
+location" / "alerts off"), and the product-level stat now renders a 0 as
+**"Off"** with the hint *"no alerts unless a location sets its own"* — a bare
+"0" is what made the original screenshot read as a contradiction.
+
+**Files:** `server/src/lib/low-stock.ts` (new) · `stock.service.ts` ·
+`reorder.service.ts` · `reports/report.routes.ts` ·
+`client/src/lib/types.ts` · `client/src/pages/ProductDetailPage.tsx`
+
+**Tests:** `server/src/modules/stock/low-stock.test.ts` (new, 10) — the rule in
+isolation (zero = off, at-the-threshold is low, a location minimum replaces
+the default including a *lower* one); then through `stockLevels`: normal, low,
+**threshold 0 with a full shelf and with an empty one**, a location minimum
+overriding the default without touching the neighbouring shelf, a location
+switching alerts off for a tracked product, a threshold change taking effect
+on the next read (nothing is cached), and finally the screen and the reorder
+report reaching the **same verdict about the same shelf** — which is the
+regression that started this. `api-contract.test.ts` updated: `threshold` and
+`thresholdSource` are now part of the levels contract.
+
+**No migration** — `ProductLocationSetting` already exists; nothing was added
+to the schema and no threshold is hardcoded anywhere.
+
+**Deliberately unchanged:** the dashboard's low-stock card still totals stock
+company-wide against the product default. It answers "which products need
+attention", not "which shelves" — the per-shelf question is the reorder
+report's job. Mixing a location minimum into a company-wide total is the exact
+error PRD §11 describes, so it now shares only the zero rule.

@@ -336,6 +336,16 @@ export type StockLevel = {
   /** sellable − reserved: what a NEW order can actually take. */
   available: string;
 
+  /**
+   * The minimum that was ACTUALLY applied to this shelf — the location's own
+   * if it has one, otherwise the product default. Returned so a screen can
+   * never show one threshold while the badge was judged against another.
+   * STRING (Decimal). 0 means alerts are off for this shelf.
+   */
+  threshold: string;
+  /** Which of the two the threshold came from. */
+  thresholdSource: "product" | "location";
+
   /** Judged on `available`, not on hand — see the note in stock.service.ts. */
   lowStock: boolean;
 };

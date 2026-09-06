@@ -29,6 +29,10 @@
  */
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
+import {
+  effectiveThreshold,
+  isLowStock,
+} from "../../lib/low-stock.js";
 import { AppError } from "../../middleware/error.js";
 import type { UpsertSettingInput } from "./reorder.schemas.js";
 
@@ -109,15 +113,17 @@ export async function reorderReport(
       const key = `${product.id}:${location.id}`;
       const setting = settingByKey.get(key);
 
-      // The effective minimum for THIS shelf.
-      const min = setting?.minQuantity ?? product.lowStockThreshold;
-      // A zero minimum means "don't track this here" — otherwise every
-      // product at every location would appear the moment it hit zero,
-      // burying the shelves that genuinely need attention.
-      if (min.lessThanOrEqualTo(0)) continue;
-
+      // The effective minimum for THIS shelf, and the zero-means-off rule —
+      // both from lib/low-stock.ts, so this report, the stock list and the
+      // alerts can no longer drift apart.
+      const min = effectiveThreshold(
+        product.lowStockThreshold,
+        setting?.minQuantity
+      );
       const onHand = onHandByKey.get(key) ?? new D(0);
-      if (onHand.greaterThan(min)) continue; // this shelf is fine
+      // ON HAND, not available, on purpose: you don't buy more of something
+      // you already own, whatever condition it's in.
+      if (!isLowStock(onHand, min)) continue; // this shelf is fine
 
       const max = setting?.maxQuantity ?? null;
       const suggested = setting?.reorderQuantity

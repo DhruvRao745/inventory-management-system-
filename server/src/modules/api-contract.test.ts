@@ -167,6 +167,11 @@ describe("contract — response shapes the client depends on", () => {
       "reserved",
       "available",
       "lowStock",
+      // The threshold the row was JUDGED against, and where it came from.
+      // Part of the contract since BUG-2: the screen must be able to show the
+      // number the badge actually used, not the product default it assumed.
+      "threshold",
+      "thresholdSource",
     ]) {
       expect(res.body[0]).toHaveProperty(field);
     }

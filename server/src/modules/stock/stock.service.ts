@@ -11,6 +11,10 @@ import { randomUUID } from "node:crypto";
 import { prisma } from "../../lib/prisma.js";
 import { AppError } from "../../middleware/error.js";
 import { notifyLowStock } from "../../lib/notify.js";
+import {
+  effectiveThreshold,
+  isLowStock,
+} from "../../lib/low-stock.js";
 import { lockStock, lockCost, LOCKED_TX_OPTIONS } from "../../lib/locks.js";
 import { availableQuantity } from "../../lib/reservations.js";
 import { recordAudit } from "../../lib/audit.js";
@@ -314,7 +318,7 @@ export async function createMovement(
         // screen judges on available is worse than either rule alone — the
         // badge would light up with no email, or an email would arrive about a
         // shelf the UI calls healthy, and nobody would trust either.
-        const [{ available }, product] = await Promise.all([
+        const [{ available }, product, setting] = await Promise.all([
           availableQuantity(prisma, companyId, {
             productId: input.productId,
             locationId: input.locationId,
@@ -323,19 +327,34 @@ export async function createMovement(
             where: { id: input.productId },
             select: { name: true, sku: true, lowStockThreshold: true },
           }),
+          // The shelf this movement happened on may carry its own minimum.
+          // Alerting on the product default while the screen shows the
+          // location's number is the inconsistency this whole fix is about.
+          prisma.productLocationSetting.findUnique({
+            where: {
+              companyId_productId_locationId: {
+                companyId,
+                productId: input.productId,
+                locationId: input.locationId,
+              },
+            },
+            select: { minQuantity: true },
+          }),
         ]);
-        if (
-          product &&
-          product.lowStockThreshold.greaterThan(0) &&
-          available.lessThanOrEqualTo(product.lowStockThreshold)
-        ) {
-          await notifyLowStock({
-            productName: product.name,
-            sku: product.sku,
-            onHand: formatQuantity(available),
-            threshold: formatQuantity(product.lowStockThreshold),
-            location: movement.location.name,
-          });
+        if (product) {
+          const threshold = effectiveThreshold(
+            product.lowStockThreshold,
+            setting?.minQuantity
+          );
+          if (isLowStock(available, threshold)) {
+            await notifyLowStock({
+              productName: product.name,
+              sku: product.sku,
+              onHand: formatQuantity(available),
+              threshold: formatQuantity(threshold),
+              location: movement.location.name,
+            });
+          }
         }
       } catch {
         /* alerts must never affect the stock operation */
@@ -546,6 +565,25 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
   const productById = new Map(products.map((p) => [p.id, p]));
   const locationById = new Map(locations.map((l) => [l.id, l]));
 
+  // Per-shelf minimums (PRD §11). One grouped read for the whole page, not a
+  // lookup per row — same N+1 reasoning as the reservations query below.
+  // Before this, the Stock page and the Product Details location badge were
+  // the only places that ignored these, so a location could carry its own
+  // minimum and nothing on screen would ever reflect it.
+  const locationSettings = await prisma.productLocationSetting.findMany({
+    where: {
+      companyId,
+      productId: { in: productIds },
+      locationId: { in: locationIds },
+    },
+    select: { productId: true, locationId: true, minQuantity: true },
+  });
+  const minByShelf = new Map(
+    locationSettings
+      .filter((s) => s.minQuantity !== null)
+      .map((s) => [`${s.productId}:${s.locationId}`, s.minQuantity!])
+  );
+
   // Reserved per shelf, in ONE grouped query rather than one per row (P2-1).
   // A per-row lookup here would be an N+1 across the whole catalogue — the
   // sort of thing that is invisible on ten products and fatal on ten thousand.
@@ -609,6 +647,7 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
 
       const reserved =
         reservedByShelf.get(`${g.productId}:${g.locationId}`) ?? new Dec(0);
+      const locationMin = minByShelf.get(`${g.productId}:${g.locationId}`);
       // Available is built on SELLABLE, not on hand: damaged goods can't fill
       // an order any more than reserved ones can.
       const available = sellable.minus(reserved);
@@ -623,12 +662,26 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
         expired,
         reserved,
         available, // sellable − reserved: what a new order can actually take
+
+        // The minimum that ACTUALLY applies here: this location's if it sets
+        // one, otherwise the product's default. Returned, not just used, so
+        // the screen can show the number it was judged against — a badge that
+        // says "low" next to a threshold it didn't use is the bug that
+        // started all this.
+        threshold: locationMin ?? product.lowStockThreshold,
+        thresholdSource: locationMin ? ("location" as const) : ("product" as const),
+
         // Low stock is judged on AVAILABLE. Goods that are promised, damaged
         // or quarantined can't fill the next order, so a shelf that looks full
         // but is entirely spoken-for or broken genuinely does need reordering.
+        // A threshold of 0 means alerts are OFF for this shelf — see
+        // lib/low-stock.ts.
         lowStock:
           product.isActive &&
-          available.lessThanOrEqualTo(product.lowStockThreshold),
+          isLowStock(
+            available,
+            effectiveThreshold(product.lowStockThreshold, locationMin)
+          ),
       };
     })
     .filter((row) => row !== null);

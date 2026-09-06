@@ -13,6 +13,7 @@ import { Router } from "express";
 import { z } from "zod";
 import { Prisma } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
+import { isLowStock } from "../../lib/low-stock.js";
 import { asyncHandler, AppError } from "../../middleware/error.js";
 import { requireAuth, type AuthRequest } from "../../middleware/auth.js";
 import { grandTotal } from "../invoices/inv.service.js";
@@ -1283,9 +1284,13 @@ reportsRouter.get(
     const lowStock = products
       .filter((p) => {
         if (!p.isActive) return false;
-        if (p.lowStockThreshold.lessThanOrEqualTo(0)) return false;
         const available = availableByProduct.get(p.id) ?? zero;
-        return available.lessThanOrEqualTo(p.lowStockThreshold);
+        // Company-wide totals against the PRODUCT default, deliberately: this
+        // card answers "which products need attention", not "which shelves".
+        // Per-shelf minimums belong to the reorder report and the stock list,
+        // so no location setting is mixed in here. The zero rule is shared,
+        // so an alert switched off is off on every screen.
+        return isLowStock(available, p.lowStockThreshold);
       })
       .map((p) => ({
         productId: p.id,
