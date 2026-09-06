@@ -2329,6 +2329,13 @@ regression that started this. `api-contract.test.ts` updated: `threshold` and
 **No migration** — `ProductLocationSetting` already exists; nothing was added
 to the schema and no threshold is hardcoded anywhere.
 
+✅ **Suite green — 29 files, 480 tests** (470 before + the 10 new ones). No
+regressions: the fractional-threshold case in `decimal-quantity.test.ts`, the
+dashboard low-stock count in `report.service.test.ts` and the zero-threshold
+skip in `generate-po.test.ts` all still pass unchanged, which is the evidence
+that the three older call sites really were already consistent with the shared
+helper.
+
 **Deliberately unchanged:** the dashboard's low-stock card still totals stock
 company-wide against the product default. It answers "which products need
 attention", not "which shelves" — the per-shelf question is the reorder
