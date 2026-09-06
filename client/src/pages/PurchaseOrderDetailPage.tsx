@@ -54,6 +54,11 @@ export function PurchaseOrderDetailPage() {
   const [receiveOpen, setReceiveOpen] = useState(false);
   const [receiveLocationId, setReceiveLocationId] = useState("");
   const [receiveQtys, setReceiveQtys] = useState<Record<string, string>>({});
+  // Batch numbers, keyed by PO line id. Only batch-tracked lines use these;
+  // the field isn't rendered for anything else, so the map stays sparse.
+  const [receiveBatches, setReceiveBatches] = useState<Record<string, string>>(
+    {}
+  );
   const [receiveError, setReceiveError] = useState<string | null>(null);
   const [receiveBusy, setReceiveBusy] = useState(false);
 
@@ -200,6 +205,10 @@ export function PurchaseOrderDetailPage() {
       );
     });
     setReceiveQtys(seed);
+    // Never carry a batch number over from a previous delivery — each
+    // physical consignment has its own, and a stale one would silently
+    // merge two lots into the wrong batch.
+    setReceiveBatches({});
     setReceiveError(null);
     setReceiveOpen(true);
   }
@@ -209,11 +218,32 @@ export function PurchaseOrderDetailPage() {
     setReceiveError(null);
     if (!receiveLocationId) return setReceiveError("Pick a location.");
 
-    const linesToReceive = (po?.lines ?? [])
-      .map((l) => ({ lineId: l.id, quantity: Number(receiveQtys[l.id] || 0) }))
-      .filter((r) => r.quantity > 0);
-    if (linesToReceive.length === 0)
+    const incoming = (po?.lines ?? []).filter(
+      (l) => Number(receiveQtys[l.id] || 0) > 0
+    );
+    if (incoming.length === 0)
       return setReceiveError("Enter a quantity for at least one item.");
+
+    // Same rule the server enforces, checked here so the user is told BEFORE
+    // the round trip — and told next to the field they have to fill in.
+    // The server still checks: this is feedback, not the guard.
+    const missing = incoming.find(
+      (l) => l.product.tracksBatch && !receiveBatches[l.id]?.trim()
+    );
+    if (missing)
+      return setReceiveError(
+        `${missing.product.name} is batch-tracked — enter the batch number shown on the goods.`
+      );
+
+    const linesToReceive = incoming.map((l) => ({
+      lineId: l.id,
+      quantity: Number(receiveQtys[l.id]),
+      // Only send it when the product actually tracks batches. Sending an
+      // empty string for the rest would fail the server's min(1) check.
+      ...(l.product.tracksBatch
+        ? { batchNumber: receiveBatches[l.id]!.trim() }
+        : {}),
+    }));
 
     setReceiveBusy(true);
     try {
@@ -540,33 +570,64 @@ export function PurchaseOrderDetailPage() {
                   0,
                   qtyNum(l.quantity) - qtyNum(l.receivedQty)
                 );
+                // The batch field only earns its space when the product tracks
+                // batches AND something is actually coming in on this receipt.
+                const needsBatch =
+                  l.product.tracksBatch &&
+                  remaining > 0 &&
+                  Number(receiveQtys[l.id] || 0) > 0;
                 return (
-                  <div
-                    key={l.id}
-                    className="grid grid-cols-[1fr_auto_auto] items-center gap-2"
-                  >
-                    <span className="text-sm font-bold text-[var(--text)]">
-                      {l.product.name}
-                    </span>
-                    <span className="text-right text-sm font-semibold text-[var(--muted)]">
-                      {remaining.toLocaleString()}
-                    </span>
-                    <div className="w-24">
-                      <Input
-                        type="number"
-                        min="0"
-                        step="any"
-                        max={remaining}
-                        disabled={remaining === 0}
-                        value={receiveQtys[l.id] ?? ""}
-                        onChange={(e) =>
-                          setReceiveQtys((cur) => ({
-                            ...cur,
-                            [l.id]: e.target.value,
-                          }))
-                        }
-                      />
+                  <div key={l.id} className="space-y-1">
+                    <div className="grid grid-cols-[1fr_auto_auto] items-center gap-2">
+                      <span className="text-sm font-bold text-[var(--text)]">
+                        {l.product.name}
+                        {l.product.tracksBatch && (
+                          <span className="ml-2 rounded-[4px] border-2 border-[var(--line)] bg-[var(--panel)] px-1.5 py-0.5 text-[10px] font-black uppercase tracking-wide text-[var(--muted)]">
+                            Batch
+                          </span>
+                        )}
+                      </span>
+                      <span className="text-right text-sm font-semibold text-[var(--muted)]">
+                        {remaining.toLocaleString()}
+                      </span>
+                      <div className="w-24">
+                        <Input
+                          type="number"
+                          min="0"
+                          step="any"
+                          max={remaining}
+                          disabled={remaining === 0}
+                          value={receiveQtys[l.id] ?? ""}
+                          onChange={(e) =>
+                            setReceiveQtys((cur) => ({
+                              ...cur,
+                              [l.id]: e.target.value,
+                            }))
+                          }
+                        />
+                      </div>
                     </div>
+
+                    {needsBatch && (
+                      <div className="pl-1">
+                        <Field
+                          label="Batch number"
+                          hint="printed on the carton — this consignment only"
+                        >
+                          <Input
+                            value={receiveBatches[l.id] ?? ""}
+                            placeholder="e.g. WH-2026-04"
+                            maxLength={60}
+                            onChange={(e) =>
+                              setReceiveBatches((cur) => ({
+                                ...cur,
+                                [l.id]: e.target.value,
+                              }))
+                            }
+                          />
+                        </Field>
+                      </div>
+                    )}
                   </div>
                 );
               })}

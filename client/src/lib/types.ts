@@ -129,7 +129,14 @@ export type PurchaseOrderLine = {
   quantity: string;
   receivedQty: string;
   unitCost: string;
-  product: { id: string; sku: string; name: string; unit: string };
+  /** tracksBatch drives the batch-number field on the Receive form. */
+  product: {
+    id: string;
+    sku: string;
+    name: string;
+    unit: string;
+    tracksBatch: boolean;
+  };
 };
 
 export type PurchaseOrder = {

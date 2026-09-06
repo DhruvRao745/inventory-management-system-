@@ -135,7 +135,19 @@ const poInclude = {
   createdBy: { select: { id: true, name: true } },
   lines: {
     include: {
-      product: { select: { id: true, sku: true, name: true, unit: true } },
+      // tracksBatch travels with the line because the RECEIVE FORM needs it.
+      // Without it the client can't know which lines require a batch number,
+      // so the rule only ever surfaced as a 400 after the user pressed
+      // Receive — a field the form was never able to render.
+      product: {
+        select: {
+          id: true,
+          sku: true,
+          name: true,
+          unit: true,
+          tracksBatch: true,
+        },
+      },
     },
   },
 } as const;

@@ -2166,3 +2166,96 @@ not selling one, and a FLAT invoice makes no claim about tax.
   entry, leaving the movement rows untouched. Production never held the
   product, so no prod run was needed.
 - **P3 had no specification.** Mr. Rao wrote one; see above.
+
+---
+
+# Bug fixes from the testing round (Sept 2026)
+
+Live site under test: **https://stockpilot-app.up.railway.app** (Railway + Neon).
+The testers work through the app by hand; each bug below is fixed one at a time.
+
+## BUG-1 (P1) — Receive PO: no batch-number field for batch-tracked products
+
+**Reported:** PO-0001 contains the batch-tracked product "wheat". Pressing
+Receive shows *"wheat is batch-tracked — enter the batch number shown on the
+goods"*, but the form has no batch-number field. The receipt is impossible to
+complete.
+
+**What that message actually was.** Not a hint label with a missing input next
+to it — it was the **server's 400 error** rendered in the modal's `ErrorAlert`
+after submit. The form was demanding something it never rendered.
+
+**Root cause — one fact, split across the wire, never joined.**
+
+The backend was complete the whole time: `receiveSchema` already accepted
+`batchNumber` (`po.schemas.ts`), and `receivePO` already wrote it to all three
+places that need it — the goods-receipt line, the `PURCHASE` stock movement,
+and `receiveIntoBatch()`. The frontend was blind:
+
+| Step | Where | State before |
+|---|---|---|
+| PO detail API | `po.service.ts` `poInclude` | product select was `{id, sku, name, unit}` — **`tracksBatch` missing** |
+| Client type | `client/src/lib/types.ts` | mirrored the API — no `tracksBatch` |
+| Receive modal | `PurchaseOrderDetailPage.tsx` | qty input only; posted `{lineId, quantity}` |
+| Server check | `po.service.ts` | `product.tracksBatch && !r.batchNumber` → 400 |
+
+The form could not know which lines were batch-tracked, because nothing told
+it. **Same shape as the Shivaay price bug and the logo bug:** a value the
+server owns, displayed or enforced from a place that never reads it. Worth
+generalising — *if one side enforces a rule, the other side has to be told the
+rule exists, not just the verdict.*
+
+**Fix — four files, no backend logic touched.**
+
+1. `server/.../po.service.ts` — `poInclude` now selects `tracksBatch` on the
+   line's product. This is the whole backend change; the transaction, the
+   advisory locks (`lockDocument` → `lockStock` → `lockCost`), the costing and
+   the ledger writes are untouched.
+2. `client/src/lib/types.ts` — `PurchaseOrderLine.product` gained
+   `tracksBatch: boolean`.
+3. `client/src/pages/PurchaseOrderDetailPage.tsx`
+   - new `receiveBatches` state, keyed by PO line id; **cleared on every
+     `openReceive`** — a batch number must never carry over from a previous
+     delivery, or two physically different lots quietly merge into one.
+   - a **Batch** pill next to batch-tracked item names, so the requirement is
+     visible before anything is typed.
+   - the batch input renders only when the product tracks batches AND a
+     quantity > 0 has been entered for that line — a field for goods that
+     aren't arriving is noise.
+   - client-side check with the same wording as the server's, so the user is
+     told *before* the round trip. The server still enforces; this is
+     feedback, not the guard.
+   - `batchNumber` is only put in the payload for batch-tracked lines — an
+     empty string would fail the schema's `min(1)` for everything else.
+4. `server/.../po.receive.test.ts` — **new file, 7 tests**: the API exposes
+   `tracksBatch`; missing batch → 400 with nothing written (no movement, no
+   GRN, status still ORDERED); the number lands on the receipt line, the
+   movement and the lot; a non-tracked product receives with no batch at all
+   and no lot is invented for it; mixed receipt (batch + non-batch) in one
+   call; **partial receiving keeps each consignment's batch separate**
+   (60 → WH-A, 40 → WH-B, two lots, PARTIAL throughout); over-receiving is
+   still refused.
+
+**Verified:** client `tsc` 0 errors, server `tsc` 0 errors.
+✅ **Suite green — 28 files, 470 tests passing** (463 before + the 7 new ones),
+run by Mr. Rao on his machine. No regressions.
+Note for next time: the vitest suite can't be run from the sandbox — it needs
+Postgres on `localhost:5432` (`inventory_test`), which that shell can't reach,
+and the cloud fallback dies on Prisma's 403-blocked engine download (the same
+wall hit on the Shivaay project). **Mr. Rao runs `npm test` from `server/`**
+with the dev Postgres up.
+
+**No migration needed** — `batchNumber` columns already exist.
+
+**Manual retest:** PO-0001 → Receive items → the wheat line shows a BATCH pill
+and, once a quantity is entered, a Batch number field. Leave it empty → inline
+error naming wheat. Fill it → receipt succeeds, stock rises, and the lot shows
+under Batches with that number. Receive part of a line, then the rest with a
+different batch number → two separate lots.
+
+**Left alone deliberately** (the receive endpoint accepts them, the form still
+doesn't send them — out of scope for this bug, worth their own ticket):
+`rejectedQty` / `rejectReason`, `actualUnitCost`, `manufactureDate` and
+`expiryDate`. **Expiry is the one that matters**: FEFO sorts by expiry, and a
+lot received without one sorts last, so batch-tracked perishables can't
+currently be given their expiry date at the point of receipt.
