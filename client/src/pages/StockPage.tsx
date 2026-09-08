@@ -5,6 +5,7 @@
  */
 import { useEffect, useState, type FormEvent } from "react";
 import { qtyNum, formatQty } from "../lib/format";
+import { precisionError, stepFor } from "../lib/quantity";
 import { api, ApiError } from "../lib/api";
 import type { Product, Location, StockMovement } from "../lib/types";
 import { Modal } from "../components/Modal";
@@ -168,6 +169,13 @@ export function StockPage() {
     e.preventDefault();
     setFormError(null);
     setFormOk(null);
+    // Refuse it here in the same words the server would use, rather than
+    // letting the user submit and be rejected (BUG-8). The server still
+    // enforces — this is feedback, not the guard.
+    if (qtyProblem) {
+      setFormError(qtyProblem);
+      return;
+    }
     setBusy(true);
     try {
       await api("/stock/movements", {
@@ -243,6 +251,11 @@ export function StockPage() {
   const isIncoming = type === "PURCHASE" || type === "RETURN_IN";
   const selectedProduct = products.find((p) => p.id === productId);
   const showBatch = isIncoming && !!selectedProduct?.tracksBatch;
+  // Same rule the server enforces, so a legal quantity is never refused after
+  // the round trip. ADJUSTMENT may be negative, so check the magnitude.
+  const qtyProblem = selectedProduct
+    ? precisionError(quantity.replace(/^-/, ""), selectedProduct)
+    : null;
 
   return (
     <div className="space-y-8">
@@ -288,15 +301,33 @@ export function StockPage() {
               </Field>
               <Field
                 label="Quantity"
-                hint={type === "ADJUSTMENT" ? "use − for losses" : undefined}
+                hint={
+                  type === "ADJUSTMENT"
+                    ? "use − for losses"
+                    : selectedProduct && selectedProduct.precision > 0
+                      ? `up to ${selectedProduct.precision} decimal place${
+                          selectedProduct.precision === 1 ? "" : "s"
+                        } (${selectedProduct.unit})`
+                      : undefined
+                }
               >
                 <Input
                   type="number"
                   required
-                  step="any"
+                  // The selected product's own rule (BUG-8) — "any" let the
+                  // browser accept a value the server was always going to
+                  // refuse, and the user found out only after submitting.
+                  step={
+                    selectedProduct ? stepFor(selectedProduct.precision) : "any"
+                  }
                   value={quantity}
                   onChange={(e) => setQuantity(e.target.value)}
                 />
+                {qtyProblem && (
+                  <div className="mt-1 text-[10px] font-bold text-red-500">
+                    {qtyProblem}
+                  </div>
+                )}
               </Field>
             </div>
 

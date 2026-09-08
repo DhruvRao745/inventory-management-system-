@@ -16,6 +16,7 @@ import type {
 } from "../lib/types";
 import { poNumber } from "../lib/types";
 import { formatMoney, qtyNum, formatQty } from "../lib/format";
+import { precisionError, stepFor } from "../lib/quantity";
 import { useAuth } from "../context/AuthContext";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { Modal } from "../components/Modal";
@@ -59,6 +60,9 @@ export function PurchaseOrderDetailPage() {
   const [receiveBatches, setReceiveBatches] = useState<Record<string, string>>(
     {}
   );
+  // What the supplier ACTUALLY charged, per line. Seeded from the PO price;
+  // the weighted average follows this number, not what was quoted.
+  const [receiveCosts, setReceiveCosts] = useState<Record<string, string>>({});
   const [receiveError, setReceiveError] = useState<string | null>(null);
   const [receiveBusy, setReceiveBusy] = useState(false);
 
@@ -205,6 +209,14 @@ export function PurchaseOrderDetailPage() {
       );
     });
     setReceiveQtys(seed);
+    // Default the actual cost to what was ordered — the common case is that
+    // the supplier charged the agreed price, and pre-filling it means the
+    // operator only touches the field when something changed.
+    const costs: Record<string, string> = {};
+    po?.lines.forEach((l) => {
+      costs[l.id] = String(Number(l.unitCost));
+    });
+    setReceiveCosts(costs);
     // Never carry a batch number over from a previous delivery — each
     // physical consignment has its own, and a stale one would silently
     // merge two lots into the wrong batch.
@@ -235,15 +247,34 @@ export function PurchaseOrderDetailPage() {
         `${missing.product.name} is batch-tracked — enter the batch number shown on the goods.`
       );
 
-    const linesToReceive = incoming.map((l) => ({
-      lineId: l.id,
-      quantity: Number(receiveQtys[l.id]),
-      // Only send it when the product actually tracks batches. Sending an
-      // empty string for the rest would fail the server's min(1) check.
-      ...(l.product.tracksBatch
-        ? { batchNumber: receiveBatches[l.id]!.trim() }
-        : {}),
-    }));
+    // Same precision rule the server enforces, checked here so a legal
+    // quantity is never rejected after the round trip and an illegal one is
+    // explained beside the field (BUG-8).
+    for (const l of incoming) {
+      const problem = precisionError(receiveQtys[l.id] ?? "", l.product);
+      if (problem) return setReceiveError(problem);
+    }
+
+    const linesToReceive = incoming.map((l) => {
+      const typed = receiveCosts[l.id];
+      const actual = typed === undefined || typed.trim() === "" ? null : Number(typed);
+      const quoted = Number(l.unitCost);
+      return {
+        lineId: l.id,
+        quantity: Number(receiveQtys[l.id]),
+        // Only send it when the product actually tracks batches. Sending an
+        // empty string for the rest would fail the server's min(1) check.
+        ...(l.product.tracksBatch
+          ? { batchNumber: receiveBatches[l.id]!.trim() }
+          : {}),
+        // Send the actual cost only when it DIFFERS from the quoted price.
+        // Sending it always would be harmless but noisy; sending it only on
+        // a change keeps "we were charged what we agreed" the silent default.
+        ...(actual !== null && Number.isFinite(actual) && actual !== quoted
+          ? { actualUnitCost: actual }
+          : {}),
+      };
+    });
 
     setReceiveBusy(true);
     try {
@@ -572,10 +603,13 @@ export function PurchaseOrderDetailPage() {
                 );
                 // The batch field only earns its space when the product tracks
                 // batches AND something is actually coming in on this receipt.
-                const needsBatch =
-                  l.product.tracksBatch &&
-                  remaining > 0 &&
-                  Number(receiveQtys[l.id] || 0) > 0;
+                const receivingNow =
+                  remaining > 0 && Number(receiveQtys[l.id] || 0) > 0;
+                const needsBatch = l.product.tracksBatch && receivingNow;
+                const qtyProblem = precisionError(
+                  receiveQtys[l.id] ?? "",
+                  l.product
+                );
                 return (
                   <div key={l.id} className="space-y-1">
                     <div className="grid grid-cols-[1fr_auto_auto] items-center gap-2">
@@ -594,7 +628,8 @@ export function PurchaseOrderDetailPage() {
                         <Input
                           type="number"
                           min="0"
-                          step="any"
+                          // The product's own rule, not a blanket "any".
+                          step={stepFor(l.product.precision)}
                           max={remaining}
                           disabled={remaining === 0}
                           value={receiveQtys[l.id] ?? ""}
@@ -607,6 +642,34 @@ export function PurchaseOrderDetailPage() {
                         />
                       </div>
                     </div>
+
+                    {qtyProblem && (
+                      <div className="pl-1 text-[10px] font-bold text-red-500">
+                        {qtyProblem}
+                      </div>
+                    )}
+
+                    {receivingNow && (
+                      <div className="pl-1">
+                        <Field
+                          label="Actual unit cost"
+                          hint={`ordered at ${formatMoney(Number(l.unitCost), currency)} — change it if the supplier charged something else`}
+                        >
+                          <Input
+                            type="number"
+                            min="0"
+                            step="0.01"
+                            value={receiveCosts[l.id] ?? ""}
+                            onChange={(e) =>
+                              setReceiveCosts((cur) => ({
+                                ...cur,
+                                [l.id]: e.target.value,
+                              }))
+                            }
+                          />
+                        </Field>
+                      </div>
+                    )}
 
                     {needsBatch && (
                       <div className="pl-1">

@@ -135,6 +135,8 @@ export type PurchaseOrderLine = {
     sku: string;
     name: string;
     unit: string;
+    /** Decimal places allowed — the same field the server enforces. */
+    precision: number;
     tracksBatch: boolean;
   };
 };

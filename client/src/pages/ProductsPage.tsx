@@ -9,6 +9,7 @@ import { api, ApiError } from "../lib/api";
 import type { Product, StockLevel, Supplier } from "../lib/types";
 import { useAuth } from "../context/AuthContext";
 import { COMMON_GST_RATES } from "../lib/gst";
+import { suggestedPrecision } from "../lib/quantity";
 import { Modal } from "../components/Modal";
 import { ConfirmModal } from "../components/ConfirmModal";
 import { hashColor } from "../lib/colors";
@@ -39,6 +40,7 @@ const emptyForm = {
   categoryId: "",
   preferredSupplierId: "",
   unit: "pcs",
+  precision: "0",
   costPrice: "0",
   sellingPrice: "0",
   lowStockThreshold: "0",
@@ -208,6 +210,7 @@ export function ProductsPage() {
       categoryId: p.categoryId ?? "",
       preferredSupplierId: p.preferredSupplierId ?? "",
       unit: p.unit,
+      precision: String(p.precision),
       costPrice: p.costPrice,
       sellingPrice: p.sellingPrice,
       lowStockThreshold: String(p.lowStockThreshold),
@@ -285,6 +288,7 @@ export function ProductsPage() {
       categoryId: form.categoryId,
       preferredSupplierId: form.preferredSupplierId,
       unit: form.unit,
+      precision: Number(form.precision),
       costPrice: Number(form.costPrice),
       sellingPrice: Number(form.sellingPrice),
       lowStockThreshold: Number(form.lowStockThreshold),
@@ -647,10 +651,37 @@ export function ProductsPage() {
                 <Input
                   required
                   value={form.unit}
-                  onChange={(e) => setField("unit", e.target.value)}
+                  onChange={(e) => {
+                    const unit = e.target.value;
+                    setField("unit", unit);
+                    // Suggest the decimal places this unit usually needs, but
+                    // only while adding — silently re-deciding an existing
+                    // product's precision because someone fixed a typo in the
+                    // unit would change what quantities are legal for it.
+                    if (modal === "add") {
+                      setField("precision", String(suggestedPrecision(unit)));
+                    }
+                  }}
                 />
               </Field>
             </div>
+            <Field
+              label="Decimal places"
+              hint="0 = whole units only. A product measured in kg or litres needs 2–3."
+            >
+              <Select
+                value={form.precision}
+                onChange={(e) => setField("precision", e.target.value)}
+              >
+                {[0, 1, 2, 3, 4].map((n) => (
+                  <option key={n} value={String(n)}>
+                    {n === 0
+                      ? `0 — whole ${form.unit || "units"} only`
+                      : `${n} — e.g. ${(1.5).toFixed(n)} ${form.unit || "units"}`}
+                  </option>
+                ))}
+              </Select>
+            </Field>
             <Field label="Barcode" hint="for scanning — optional">
               <div className="flex gap-2">
                 <Input

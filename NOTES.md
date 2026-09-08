@@ -2612,3 +2612,84 @@ Worth making a habit: every fix gets at least one test that tries to DO the
 forbidden thing, not just look at it.
 
 ✅ **Suite green — 32 files, 513 tests** (492 before + 21 new).
+
+## BUG-8 (P1) — "67.5 isn't a valid quantity" on a product measured in kg
+
+**Reported:** receiving a batch-tracked product stocked in **kg** at `67.5` was
+refused with *"PI is counted in whole kg — 67.5 isn't a valid quantity"*.
+
+**Root cause — the validation was right and the PRODUCT was wrong.**
+`Product.precision` says how many decimal places a product may use: 0 for
+staplers, 3 for rice. `assertPrecision` enforces it correctly. But
+`precision` **defaults to 0 and the product form never exposed it**, so every
+product ever created through the UI was whole-units-only, whatever its unit
+said. A product could be measured in kg and still be configured as countable
+in whole pieces, and nothing on screen could change that.
+
+So the error message was accurate and useless: it described a setting the user
+had never been shown and could not reach.
+
+**Fix — expose the setting, and share the rule.**
+
+- **Product form** gained a **Decimal places** selector (0–4) on add and edit.
+- Typing a unit like `kg`, `litre` or `metre` while ADDING pre-fills a
+  sensible number of decimals (`client/src/lib/quantity.ts`,
+  `suggestedPrecision`). A suggestion, not a rule: the field stays visible and
+  editable. It deliberately does NOT re-suggest on EDIT — silently changing
+  what quantities are legal for an existing product because someone fixed a
+  typo in the unit would be the same class of bug in a new place.
+- **The same rule now runs on both sides.** `client/src/lib/quantity.ts`
+  mirrors the server's check and its exact wording; the PO receive form and
+  the stock movement form both validate before submitting and set
+  `<input step>` from the product's precision instead of `"any"`. The server
+  still enforces — the client is feedback, not the guard, and both read the
+  same `product.precision` field, so there is one rule with two readers.
+- `poInclude` now returns `product.precision` so the receive form can apply it.
+
+**Validation was not weakened anywhere.** A whole-number product still refuses
+2.5; a 1-decimal product still refuses 0.5001.
+
+## BUG-9 (P1) — no way to record what the supplier actually charged
+
+**Reported:** a PO agreed at ₹50/unit, 60 units received, actually charged
+₹52 — and the Receive form has nowhere to say so.
+
+**Root cause — frontend only. NO SCHEMA CHANGE REQUIRED.** The backend has
+supported this since P1-7 and it was already correct:
+
+- `receiveSchema` accepts `actualUnitCost` per line
+- `receivePO` falls back to the PO line's `unitCost` when it is absent, feeds
+  it to `costStockIn` (so the weighted average follows what we PAID), stamps
+  it on the `StockMovement` as `unitCost`/`costAtTime`, writes it to
+  `GoodsReceiptLine.actualUnitCost`, and passes it to `receiveIntoBatch`
+- the PO line's own `unitCost` is never touched, so the order keeps what was
+  ordered
+
+Every requirement in the ticket was already satisfied by the service. The form
+simply never sent the field — the **same shape as BUG-1**: a complete backend
+with no way to reach it.
+
+**Fix:** an **Actual unit cost** input per line in the Receive modal, shown
+once a quantity is entered, defaulted to the PO price with the hint *"ordered
+at ₹50 — change it if the supplier charged something else"*. It is only sent
+when it DIFFERS from the quoted price, so "we were charged what we agreed"
+stays the silent default. Receiving is already ADMIN/MANAGER-only.
+
+**Tests:** `purchase-orders/po.receive-cost.test.ts` (new, 12) — whole units;
+**67.5 kg accepted at 3 decimals**; excess precision still refused; a
+whole-number product still refusing 2.5; litre and metre decimals;
+batch-tracked decimal receiving into its lot; cost defaulting to the PO price;
+**the reported case (100 @ ₹50 ordered, 60 received @ ₹52 → avgCost 52, PO
+still says 50)**; two receipts at different costs each keeping their own with
+the average landing at 49.20; the first receipt's stamped cost NOT rewritten by
+the second; a batch valued at the actual cost; and a negative cost refused at
+the schema.
+
+✅ **Suite green — 33 files, 525 tests** (513 before + 12 new).
+
+**The pattern, now four bugs deep.** BUG-1 (batch number), BUG-9 (actual cost)
+and the display half of BUG-2 and BUG-5 were all the same shape: a complete,
+correct backend with no way to reach it from the form. Worth a habit — when a
+backend capability lands, the form that reaches it is part of the feature, not
+a follow-up. A capability nobody can invoke is indistinguishable from one that
+was never built, except that it also passes its tests.

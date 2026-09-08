@@ -145,6 +145,10 @@ const poInclude = {
           sku: true,
           name: true,
           unit: true,
+          // Decimal places this product allows. The receive form validates
+          // against the SAME field the server enforces (BUG-8), so a legal
+          // 67.5 kg is never rejected after the round trip.
+          precision: true,
           tracksBatch: true,
         },
       },
