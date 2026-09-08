@@ -44,6 +44,32 @@ import type { Tx } from "../../lib/locks.js";
 const D = Prisma.Decimal;
 export type Decimal = Prisma.Decimal;
 
+/**
+ * A lot is expired when its expiry date has PASSED. A null expiry means the
+ * goods do not expire, which is not the same as "expires now" — the
+ * distinction FEFO already relies on for sort order.
+ *
+ * Exported as a Prisma fragment so every caller filters identically. Two
+ * places writing `expiryDate: { gt: new Date() }` by hand is how one of them
+ * ends up using `gte` and disagreeing on the last day.
+ */
+export function expiredExclusion(now: Date = new Date()) {
+  return { OR: [{ expiryDate: null }, { expiryDate: { gt: now } }] };
+}
+
+/** The mirror: only lots that HAVE expired. */
+export function expiredOnly(now: Date = new Date()) {
+  return { expiryDate: { not: null, lte: now } };
+}
+
+/** Is this incoming stock already past its date on arrival? */
+export function isExpiredOnArrival(
+  expiryDate: Date | null | undefined,
+  now: Date = new Date()
+): boolean {
+  return expiryDate != null && expiryDate <= now;
+}
+
 /** One slice of an allocation: take `quantity` from `batchId`. */
 export type Allocation = {
   batchId: string;
@@ -103,6 +129,19 @@ export async function planAllocation(
       // FEFO picks the NEAREST EXPIRY first, damaged goods are exactly the
       // ones it would grab soonest.
       status: "AVAILABLE",
+      // ...and nothing past its expiry date (BUG-10).
+      //
+      // This is the bridge that was missing. Expiry is a DATE and sellability
+      // is a STATUS, and nothing turned the first into the second as time
+      // passed — so a lot that expired last month was still status AVAILABLE
+      // and FEFO, which sorts by NEAREST EXPIRY, reached for it FIRST. The
+      // rule was actively selecting the worst possible stock.
+      //
+      // Checked against the clock rather than by a nightly job that flips
+      // statuses: a job that hasn't run yet leaves expired goods sellable,
+      // and "is this expired?" has an exact answer at every instant without
+      // one. A date in the past is expired whether or not anything ran.
+      ...expiredExclusion(),
     },
     orderBy: orderFor(strategy),
   });
@@ -425,6 +464,10 @@ export async function ensureBatchCoverage(
     where: { companyId, productId, locationId, status: "AVAILABLE" },
     _sum: { remainingQuantity: true },
   });
+  // NOTE: expired lots ARE counted as coverage here on purpose. They still
+  // hold ledger units — they just can't be sold. Excluding them would make
+  // this open a second OPENING lot for stock that is already accounted for,
+  // inventing sellable units out of expired ones.
   const covered = batched._sum.remainingQuantity ?? new D(0);
 
   const shortfall = onHand.minus(covered);
@@ -487,6 +530,37 @@ export async function batchAvailable(
       locationId,
       status: "AVAILABLE",
       remainingQuantity: { gt: 0 },
+      ...expiredExclusion(),
+    },
+    _sum: { remainingQuantity: true },
+  });
+  return agg._sum.remainingQuantity ?? new D(0);
+}
+
+/**
+ * Stock that is owned, still flagged AVAILABLE, and past its expiry date.
+ *
+ * Deliberately NOT deleted or written off — it stays in the ledger and in its
+ * lot, because it is still company property, it still has to be reconciled at
+ * a stocktake, and somebody has to answer for it. What changes is that it can
+ * no longer fill an order. Reported so a screen can show the quantity rather
+ * than leaving a silent hole between "on hand" and "available".
+ */
+export async function expiredQuantity(
+  tx: Tx,
+  companyId: string,
+  productId: string,
+  locationId: string,
+  now: Date = new Date()
+): Promise<Decimal> {
+  const agg = await tx.inventoryBatch.aggregate({
+    where: {
+      companyId,
+      productId,
+      locationId,
+      status: "AVAILABLE",
+      remainingQuantity: { gt: 0 },
+      ...expiredOnly(now),
     },
     _sum: { remainingQuantity: true },
   });

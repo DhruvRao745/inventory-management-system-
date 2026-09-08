@@ -34,6 +34,7 @@ import {
   planAllocation,
   consumeAllocation,
   receiveIntoBatch,
+  isExpiredOnArrival,
 } from "./batch.service.js";
 import type {
   CreateMovementInput,
@@ -120,10 +121,32 @@ export async function createMovement(
    * letting a client tag a sale DAMAGED would drain a bucket nothing was ever
    * put into, driving it negative while sellable stock stayed untouched.
    */
-  const movementStatus: "AVAILABLE" | "DAMAGED" | "QUARANTINE" | "EXPIRED" =
+  let movementStatus: "AVAILABLE" | "DAMAGED" | "QUARANTINE" | "EXPIRED" =
     input.type === "ADJUSTMENT" || !isOutgoing
       ? (input.status ?? "AVAILABLE")
       : "AVAILABLE";
+
+  /**
+   * Goods arriving already past their date land as EXPIRED (BUG-10).
+   *
+   * Receiving them is allowed — a delivery that turns up short-dated is a real
+   * event, and refusing to record it would mean the shelf holds stock the
+   * system denies exists, which is the failure the whole ledger is built to
+   * prevent. What must NOT happen is those units becoming sellable.
+   *
+   * This covers every incoming door at once — purchases, bare returns,
+   * positive adjustments — because they all come through here. A caller that
+   * explicitly says DAMAGED or QUARANTINE keeps its own answer: those are
+   * also non-sellable, and overriding a human's judgement with the calendar
+   * would lose information for no gain.
+   */
+  if (
+    !isOutgoing &&
+    movementStatus === "AVAILABLE" &&
+    isExpiredOnArrival(input.expiryDate ? new Date(input.expiryDate) : null)
+  ) {
+    movementStatus = "EXPIRED";
+  }
 
   // Batch-tracked products need a lot number on the way IN — without one the
   // stock has no identity and FEFO has nothing to sort. Checked before the
@@ -157,19 +180,27 @@ export async function createMovement(
         // P2-2 "available" also excludes damaged and quarantined goods. The
         // lock taken above covers reservations too — same key — so this read
         // cannot be overtaken by a reservation committing alongside it.
-        const { onHand, reserved, available } = await availableQuantity(
+        const { onHand, reserved, expired, available } = await availableQuantity(
           tx,
           companyId,
           { productId: input.productId, locationId: input.locationId }
         );
 
         if (available.plus(signedQuantity).isNegative()) {
-          // Name the reservation explicitly. "Only 2 available" when the shelf
-          // visibly holds 10 is the kind of message that gets a system called
-          // broken; "8 of 10 are reserved" is a fact someone can act on.
-          const detail = reserved.greaterThan(0)
+          // Name the REASON, not just the number. "Only 2 available" when the
+          // shelf visibly holds 10 is the kind of message that gets a system
+          // called broken; "8 of 10 are reserved" — or "8 of 10 expired" — is
+          // a fact someone can act on.
+          const because: string[] = [];
+          if (reserved.greaterThan(0)) {
+            because.push(`${formatQuantity(reserved)} reserved`);
+          }
+          if (expired.greaterThan(0)) {
+            because.push(`${formatQuantity(expired)} expired`);
+          }
+          const detail = because.length
             ? `only ${formatQuantity(available)} ${product.unit} available ` +
-              `(${formatQuantity(onHand)} on hand, ${formatQuantity(reserved)} reserved)`
+              `(${formatQuantity(onHand)} on hand, ${because.join(", ")})`
             : `only ${formatQuantity(onHand)} ${product.unit} available at this location`;
           throw new AppError(400, `Not enough stock: ${detail}`);
         }
@@ -299,7 +330,8 @@ export async function createMovement(
           input.unitCost !== undefined ? new Prisma.Decimal(input.unitCost) : null,
         expiryDate: input.expiryDate ? new Date(input.expiryDate) : null,
         // The lot inherits the movement's condition, so a quarantined delivery
-        // creates a quarantined lot that FEFO will not touch.
+        // creates a quarantined lot that FEFO will not touch — and, since
+        // BUG-10, goods that arrived past their date create an EXPIRED lot.
         status: movementStatus,
       });
     }
@@ -579,6 +611,31 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
   // product page is happily displaying. Returning both means a screen can no
   // longer show one of them as if the other did not exist.
   const batchTracked = products.filter((p) => p.tracksBatch).map((p) => p.id);
+
+  // Stock past its date but still flagged AVAILABLE (BUG-10). Owned, counted
+  // and reportable — and not sellable. Reported separately so a screen shows a
+  // quantity rather than an unexplained gap between "on hand" and "available".
+  const expiredGroups = batchTracked.length
+    ? await prisma.inventoryBatch.groupBy({
+        by: ["productId", "locationId"],
+        where: {
+          companyId,
+          productId: { in: batchTracked },
+          ...(q.locationId ? { locationId: q.locationId } : {}),
+          status: "AVAILABLE",
+          remainingQuantity: { gt: 0 },
+          expiryDate: { not: null, lte: new Date() },
+        },
+        _sum: { remainingQuantity: true },
+      })
+    : [];
+  const expiredByShelf = new Map<string, Decimal>(
+    expiredGroups.map((g): [string, Decimal] => [
+      `${g.productId}:${g.locationId}`,
+      g._sum.remainingQuantity ?? new Dec(0),
+    ])
+  );
+
   const batchGroups = batchTracked.length
     ? await prisma.inventoryBatch.groupBy({
         by: ["productId", "locationId"],
@@ -679,9 +736,14 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
       const reserved =
         reservedByShelf.get(`${g.productId}:${g.locationId}`) ?? new Dec(0);
       const locationMin = minByShelf.get(`${g.productId}:${g.locationId}`);
+      // Expired-by-DATE, as opposed to the EXPIRED movement status above:
+      // these units still say they're available, and are not.
+      const expiredByDate =
+        expiredByShelf.get(`${g.productId}:${g.locationId}`) ?? new Dec(0);
       // Available is built on SELLABLE, not on hand: damaged goods can't fill
-      // an order any more than reserved ones can.
-      const available = sellable.minus(reserved);
+      // an order any more than reserved ones can — and neither can goods past
+      // their date, which is why they come out here too (BUG-10).
+      const available = sellable.minus(expiredByDate).minus(reserved);
 
       return {
         product,
@@ -692,7 +754,14 @@ export async function stockLevels(companyId: string, q: LevelsQuery) {
         quarantine,
         expired,
         reserved,
-        available, // sellable − reserved: what a new order can actually take
+        available, // sellable − expired − reserved: what an order can take
+        /**
+         * Owned, flagged AVAILABLE, and past its expiry date. Null for
+         * products that don't track batches — with no lot there is no date to
+         * judge. NOT deleted or written off: it is still company property and
+         * still has to be reconciled at a stocktake.
+         */
+        expiredByDate: product.tracksBatch ? expiredByDate : null,
 
         /**
          * For batch-tracked products: what the LOTS hold, using the same

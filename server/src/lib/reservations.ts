@@ -104,9 +104,12 @@ export async function availableQuantity(
   onHand: Decimal;
   sellable: Decimal;
   reserved: Decimal;
+  /** Owned, still flagged AVAILABLE, but past its expiry date (BUG-10). */
+  expired: Decimal;
   available: Decimal;
 }> {
-  const [onHandAgg, sellableAgg, reserved] = await Promise.all([
+  const [onHandAgg, sellableAgg, reserved, expiredOnShelf, writtenOffAgg] =
+    await Promise.all([
     // Everything we OWN here, whatever condition it's in. This is the figure
     // valuation and stocktakes use — a crushed box is still company property.
     client.stockMovement.aggregate({
@@ -129,13 +132,73 @@ export async function availableQuantity(
       _sum: { quantity: true },
     }),
     reservedQuantity(client, companyId, key, options),
+    // Batch-tracked goods whose date has passed. The ledger cannot see this on
+    // its own: a movement's status says DAMAGED or AVAILABLE, it does not
+    // say "and it went off last Tuesday". Expiry lives on the LOT, so the
+    // sellable figure has to ask the lots (BUG-10).
+    expiredBatchQuantity(client, companyId, key),
+    // Stock already WRITTEN OFF as expired — goods that arrived past their
+    // date, or were written off later. Never part of `sellable`, so it is not
+    // subtracted from anything; it is reported so an error message can say
+    // "10 on hand, 10 expired" instead of leaving the user to wonder why a
+    // full shelf can't fill an order.
+    client.stockMovement.aggregate({
+      where: {
+        companyId,
+        productId: key.productId,
+        locationId: key.locationId,
+        status: "EXPIRED",
+      },
+      _sum: { quantity: true },
+    }),
   ]);
 
   const onHand = onHandAgg._sum.quantity ?? new D(0);
-  const sellable = sellableAgg._sum.quantity ?? new D(0);
+  const sellableByStatus = sellableAgg._sum.quantity ?? new D(0);
+
+  // Expired stock is owned but cannot fill an order — exactly like damaged
+  // stock, just decided by the calendar instead of by someone's eyes. Taking
+  // it out HERE means every caller of this function (the stock screens, the
+  // movement guard, the invoice issue guard) excludes it without having to
+  // remember to, which is the whole reason this function exists.
+  const sellable = sellableByStatus.minus(expiredOnShelf);
+
   // Availability is built on SELLABLE, not on hand. Reserving against damaged
   // stock would promise goods that can never be delivered.
-  return { onHand, sellable, reserved, available: sellable.minus(reserved) };
+  return {
+    onHand,
+    sellable,
+    reserved,
+    // Everything past its date, however it got there: still-flagged-available
+    // lots that went off on the shelf, plus stock already written off. Only
+    // the first was ever inside `sellable`, so only the first is subtracted.
+    expired: expiredOnShelf.plus(writtenOffAgg._sum.quantity ?? new D(0)),
+    available: sellable.minus(reserved),
+  };
+}
+
+/**
+ * How much AVAILABLE-status stock on this shelf sits in lots that have
+ * expired. Zero for products that don't track batches — without a lot there
+ * is no expiry date to judge, so nothing can be excluded.
+ */
+async function expiredBatchQuantity(
+  client: Tx | typeof prisma,
+  companyId: string,
+  key: ShelfKey
+): Promise<Decimal> {
+  const agg = await client.inventoryBatch.aggregate({
+    where: {
+      companyId,
+      productId: key.productId,
+      locationId: key.locationId,
+      status: "AVAILABLE",
+      remainingQuantity: { gt: 0 },
+      expiryDate: { not: null, lte: new Date() },
+    },
+    _sum: { remainingQuantity: true },
+  });
+  return agg._sum.remainingQuantity ?? new D(0);
 }
 
 /**

@@ -194,7 +194,9 @@ describe("batch-tracked availability — the ledger and the lots agree", () => {
       quantity: 10,
       unitCost: 20,
       batchNumber: "SOON",
-      expiryDate: new Date("2026-10-01").toISOString(),
+      // Relative, not a hardcoded date — a fixture that means "still in date"
+      // must not quietly become an expired one as the calendar moves.
+      expiryDate: new Date(Date.now() + 30 * 86_400_000).toISOString(),
     } as Parameters<typeof stockService.createMovement>[2]);
 
     await sell(4);

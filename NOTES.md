@@ -2693,3 +2693,115 @@ correct backend with no way to reach it from the form. Worth a habit — when a
 backend capability lands, the form that reaches it is part of the feature, not
 a follow-up. A capability nobody can invoke is indistinguishable from one that
 was never built, except that it also passes its tests.
+
+## BUG-10 (P1) — expired stock could still be sold
+
+**Reported:** a batch-tracked product with an expiry date in the past can be
+received and then sold.
+
+**Root cause — expiry is a DATE, sellability is a STATUS, and nothing turned
+the first into the second as time passed.**
+
+`InventoryBatch` carries `expiryDate`, and `StockStatus` has an `EXPIRED`
+member — but nothing ever moved a lot from AVAILABLE to EXPIRED when its date
+went by. So a lot that went off last month was still `status: AVAILABLE` and
+passed every filter in the system.
+
+Worse than merely eligible: **FEFO sorts by nearest expiry first**, so the
+expired lot was at the FRONT of the allocation queue. The rule written to stop
+good stock rotting behind newer stock was reaching for the expired lot before
+anything else.
+
+**Why not a nightly job that flips statuses.** Because a job that has not run
+yet leaves expired goods sellable, and the window is exactly the moment the
+question matters. "Is this expired?" has an exact answer at every instant from
+the date itself, so the check is made against the clock at read time. The
+`EXPIRED` status is kept for goods somebody has explicitly written off — a
+decision, as opposed to a fact about the calendar.
+
+**Fix — one predicate, applied everywhere sellability is decided.**
+
+`expiredExclusion()` / `expiredOnly()` in `batch.service.ts` are exported
+Prisma fragments rather than inline `expiryDate: { gt: new Date() }` clauses,
+because two hand-written copies is how one of them ends up using `gte` and the
+two disagree on the last day.
+
+- **`planAllocation`** excludes expired lots → FEFO/FIFO can never select one.
+- **`availableQuantity`** (`lib/reservations.ts`) subtracts expired lot
+  quantity from `sellable`, and returns `expired` as a figure in its own right.
+  This is the important one: every caller — the stock screens, the movement
+  guard, the invoice issue guard, POS — inherits the rule without having to
+  remember it. That is the whole reason that function exists.
+- **`batchAvailable`** excludes them too, so the batch total the screen shows
+  is the total an allocation can actually find.
+- **Receiving** (`createMovement` and PO receipt): goods that arrive already
+  past their date are RECORDED but land with status `EXPIRED`, on both the
+  movement and the lot. Refusing to receive them would leave the shelf holding
+  stock the system denies exists — the exact failure the ledger prevents — but
+  they must not become sellable. This covers every incoming door at once
+  (purchase, bare return, positive adjustment) because they all pass through
+  `createMovement`. An explicit DAMAGED/QUARANTINE from the caller wins: those
+  are also non-sellable, and overriding a human's judgement with the calendar
+  would lose information for nothing.
+- **`stockLevels`** returns `expiredByDate`, and Product Details shows a red
+  "N expired" chip. Without it the difference between "on hand" and
+  "available" would be an unexplained gap — which is how this bug would have
+  looked to a user even after being fixed.
+- **Error messages** now name the reason: *"only 0 pcs available (10 on hand,
+  10 expired)"* rather than a bare shortage.
+
+**Nothing is deleted or written off.** Expired stock stays in the ledger, in
+its lot, and in the valuation — it is still company property, a stocktake will
+still find it, and somebody has to answer for it. All that changes is that it
+cannot fill an order.
+
+**Tests:** `stock/expiry.test.ts` (new, 10). The fixture distinguishes the two
+cases that matter: goods that ARRIVED expired (status EXPIRED) and goods that
+EXPIRED ON THE SHELF — the reported bug, and the harder one, because nothing
+in the row looks wrong; the test ages a lot's `expiryDate` while deliberately
+leaving its status AVAILABLE. Covers: in-date sells; expired-on-shelf refused;
+mixed lots selling only the good stock; **FEFO not picking the expired lot
+though it expires soonest**; all-expired rejected with a message naming
+expiry; expired stock still counted and reported (`expiredByDate` 8, available
+2, on hand 10); already-expired goods received but non-sellable; an ordinary
+invoice blocked exactly like POS (the guard is in the shared function, and a
+guard on one door only is not a guard); an outgoing adjustment unable to draw
+on expired stock; and a return of expired goods coming back non-sellable.
+
+### Three existing tests broke, and none of them was a regression
+
+**Two were stale fixtures.** `batch.service.test.ts` used hardcoded expiry
+dates — `"2026-09-01"`, `"2026-01-31"` — that were comfortably in the future
+when they were typed and had quietly slid into the past since. Nothing failed
+while expired lots were still sellable. The moment they stopped being sellable,
+three tests broke at once, all describing correct behaviour.
+
+Fixed with an `inDays()` helper and every date in that file made relative. A
+fixture that means "still in date" should SAY so rather than name a day that
+happened to be in the future the week it was written. Two more (`2026-09-30`,
+`2026-12-31`) were still passing but were the same time bomb with a longer
+fuse — one of them had 22 days left — so they were converted too, along with
+the one in `available-consistency.test.ts`.
+
+**One was a test whose PREMISE the fix changed.** `reports — batches > flags
+expired stock STILL counted as good` set the scene by receiving stock with a
+date ten days in the past. That state — past expiry, status AVAILABLE — is now
+unreachable that way, because goods arriving expired are written off on
+receipt. The fixture now receives in-date stock and ages the lot, which is the
+only way this state can now arise and the way it actually happens in a shop. A
+second test was added for the other half: goods received already expired ARE
+written off, and do not appear in "still counted as good".
+
+`availableQuantity` also now reports `expired` as the union of both — lots that
+went off on the shelf plus stock already written off — so a rejection can say
+"30 on hand, 30 expired" rather than a bare "only 30 available". Only the
+first is subtracted from `sellable`; the second was never in it.
+
+✅ **Suite green — 34 files, 536 tests** (525 before + 10 new + 1 added while
+fixing the report test).
+
+**Worth remembering:** those two fixtures had been WRONG for months and the
+suite never noticed, because the bug and the fixture were making the same
+mistake — both treated an expired lot as ordinary stock. A test that passes
+only because the code shares its error is not testing anything. Relative dates
+everywhere now.

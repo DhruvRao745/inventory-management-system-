@@ -922,15 +922,25 @@ export async function issueInvoice(
       // reserve 5, then be told 5 are unavailable, forever. Excluding only
       // this invoice's reservation means it can take exactly what it set
       // aside, while everyone ELSE's holds still protect them from it.
-      const { onHand, reserved, available } = await availableQuantity(
+      const { onHand, reserved, expired, available } = await availableQuantity(
         tx,
         companyId,
         { productId: line.productId, locationId: inv.locationId },
         { excludeSource: { sourceType: INVOICE_SOURCE, sourceId: inv.id } }
       );
       if (available.lessThan(line.quantity)) {
-        const other = reserved.greaterThan(0)
-          ? ` (${formatQuantity(onHand)} on hand, ${formatQuantity(reserved)} reserved elsewhere)`
+        // Say WHY, so "the shelf has 10 and you can't have any" is explained
+        // rather than merely asserted. Expired stock is the case where the
+        // number on the shelf and the number you can sell differ most.
+        const because: string[] = [];
+        if (reserved.greaterThan(0)) {
+          because.push(`${formatQuantity(reserved)} reserved elsewhere`);
+        }
+        if (expired.greaterThan(0)) {
+          because.push(`${formatQuantity(expired)} past its expiry date`);
+        }
+        const other = because.length
+          ? ` (${formatQuantity(onHand)} on hand, ${because.join(", ")})`
           : "";
         throw new AppError(
           400,

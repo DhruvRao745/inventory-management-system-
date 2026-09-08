@@ -14,7 +14,10 @@ import {
   lockCost,
   LOCKED_TX_OPTIONS,
 } from "../../lib/locks.js";
-import { receiveIntoBatch } from "../stock/batch.service.js";
+import {
+  receiveIntoBatch,
+  isExpiredOnArrival,
+} from "../stock/batch.service.js";
 import { costStockIn } from "../../lib/costing.js";
 import {
   Dec,
@@ -482,6 +485,16 @@ export async function receivePO(
         actualCost.get(r.lineId)!
       );
 
+      // A delivery that turns up already past its date is a real event and is
+      // recorded — but it lands NON-SELLABLE (BUG-10). Refusing to receive it
+      // would leave the shelf holding stock the system denies exists; letting
+      // it in as AVAILABLE would put expired goods at the front of the FEFO
+      // queue, since FEFO reaches for the nearest expiry first.
+      const arrivedExpired = isExpiredOnArrival(
+        r.expiryDate ? new Date(r.expiryDate) : null
+      );
+      const receivedStatus = arrivedExpired ? "EXPIRED" : "AVAILABLE";
+
       const movement = await tx.stockMovement.create({
         data: {
           companyId,
@@ -489,10 +502,13 @@ export async function receivePO(
           locationId: input.locationId,
           type: "PURCHASE",
           quantity: received.get(r.lineId)!, // incoming: positive
+          status: receivedStatus,
           unitCost: actualCost.get(r.lineId)!,
           costAtTime,
           reference: ref,
-          note: `Received against ${ref}`,
+          note: arrivedExpired
+            ? `Received against ${ref} — ALREADY EXPIRED, not sellable`
+            : `Received against ${ref}`,
           batchNumber: r.batchNumber,
           expiryDate: r.expiryDate ? new Date(r.expiryDate) : undefined,
           createdById: userId,
@@ -510,6 +526,9 @@ export async function receivePO(
           unitCost: actualCost.get(r.lineId)!,
           manufactureDate: r.manufactureDate ? new Date(r.manufactureDate) : null,
           expiryDate: r.expiryDate ? new Date(r.expiryDate) : null,
+          // The lot carries the same condition as the movement that created
+          // it, so an expired delivery cannot be reached by an allocation.
+          status: receivedStatus,
         });
       }
       await tx.purchaseOrderLine.update({

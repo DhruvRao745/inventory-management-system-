@@ -141,12 +141,38 @@ describe("reports — batches", () => {
   it("flags expired stock STILL counted as good — the urgent case", async () => {
     // Past expiry but status AVAILABLE means the valuation is overstated right
     // now. That is the number someone needs to act on.
-    const { get, receive } = await batchShop();
-    await receive("GONE", 5, -10);
+    //
+    // NOTE (BUG-10): this state can now only arise ONE way — stock that
+    // expired while sitting on the shelf. Goods that arrive already expired
+    // are written off on receipt, so receiving with a past date (which is how
+    // this test used to set the scene) produces a lot that is correctly
+    // flagged EXPIRED and is NOT the urgent case any more. So the fixture
+    // receives in-date stock and then lets time pass, which is what actually
+    // happens in a shop.
+    const { get, receive, company } = await batchShop();
+    await receive("GONE", 5, 30);
+    await prisma.inventoryBatch.updateMany({
+      where: { companyId: company.id, batchNumber: "GONE" },
+      data: { expiryDate: new Date(Date.now() - 10 * DAY) },
+    });
 
     const res = await get("/api/reports/expired").expect(200);
     expect(res.body.rows[0].writtenOff).toBe(false);
     expect(res.body.totals.stillCountedAsGood).toBeGreaterThan(0);
+  });
+
+  it("goods received already expired are written off on arrival", async () => {
+    // The other half of the same report, and the behaviour BUG-10 introduced:
+    // a short-dated delivery is recorded, but never counted as good stock.
+    const { get, receive } = await batchShop();
+    await receive("DOA", 5, -10);
+
+    const res = await get("/api/reports/expired").expect(200);
+    const row = res.body.rows.find(
+      (r: { batchNumber: string }) => r.batchNumber === "DOA"
+    );
+    expect(row.writtenOff).toBe(true);
+    expect(res.body.totals.stillCountedAsGood).toBe(0);
   });
 });
 

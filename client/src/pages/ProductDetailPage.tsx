@@ -281,6 +281,20 @@ export function ProductDetailPage() {
                         {formatQty(l.available, product.unit)} available
                         {l.lowStock && " · low!"}
                       </span>
+                      {/* Expired stock, named as such. It is deliberately
+                          still counted in "on hand" — we own it and it has to
+                          be reconciled — so without this the difference
+                          between what the shelf holds and what can be sold
+                          would be an unexplained gap. */}
+                      {l.expiredByDate !== null &&
+                        qtyNum(l.expiredByDate) > 0 && (
+                          <span
+                            title="Past its expiry date. Still owned and counted, but it can't be sold or picked for an order."
+                            className="rounded-[4px] border-2 border-red-500 bg-red-500/10 px-2 py-0.5 text-[10px] font-black text-red-600"
+                          >
+                            {formatQty(l.expiredByDate, product.unit)} expired
+                          </span>
+                        )}
                       {/* Batch coverage. Only shown when the lots hold LESS
                           than the ledger — that gap is why a sale can be
                           refused for stock this page is displaying, and the

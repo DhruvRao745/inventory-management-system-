@@ -387,6 +387,13 @@ export type StockLevel = {
    */
   batchAvailable: string | null;
 
+  /**
+   * Owned, still flagged AVAILABLE, and past its expiry date. Null when the
+   * product doesn't track batches. Kept visible rather than written off: it
+   * is still company property and still has to be reconciled at a stocktake.
+   */
+  expiredByDate: string | null;
+
   /** Judged on `available`, not on hand — see the note in stock.service.ts. */
   lowStock: boolean;
 };

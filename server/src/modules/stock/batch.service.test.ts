@@ -23,6 +23,21 @@ async function expectAppError(promise: Promise<unknown>, statusCode: number) {
   return err as AppError;
 }
 
+/**
+ * Expiry dates RELATIVE TO NOW.
+ *
+ * These were hardcoded ("2026-09-01") when the tests were written, and every
+ * one of them quietly slid into the past as the calendar moved. Nothing
+ * failed until expired lots stopped being sellable (BUG-10) — at which point
+ * three tests broke at once, describing behaviour that was correct.
+ *
+ * A fixture that means "still in date" should SAY so, not name a day that
+ * happened to be in the future the week it was typed.
+ */
+function inDays(days: number): string {
+  return new Date(Date.now() + days * 86_400_000).toISOString();
+}
+
 /** A batch-tracked product, plus a helper to receive lots into it. */
 async function batchSetup(strategy: "FEFO" | "FIFO" = "FEFO") {
   const base = await createTestCompany();
@@ -77,8 +92,8 @@ describe("batch inventory — FEFO allocation", () => {
 
     // Deliberately received in the WRONG order: the December lot arrives
     // first. FEFO must sort by expiry, not by arrival.
-    await receive("B", 100, "2026-12-31");
-    await receive("A", 100, "2026-09-30");
+    await receive("B", 100, inDays(120));
+    await receive("A", 100, inDays(30));
 
     await sell(120);
 
@@ -87,8 +102,8 @@ describe("batch inventory — FEFO allocation", () => {
 
   it("consumes a single batch when it covers the whole sale", async () => {
     const { receive, sell, remaining } = await batchSetup();
-    await receive("A", 100, "2026-09-30");
-    await receive("B", 100, "2026-12-31");
+    await receive("A", 100, inDays(30));
+    await receive("B", 100, inDays(120));
 
     await sell(40);
 
@@ -100,7 +115,7 @@ describe("batch inventory — FEFO allocation", () => {
     // never-expiring stock ahead of stock expiring next week — backwards.
     const { receive, sell, remaining } = await batchSetup("FEFO");
     await receive("NOEXPIRY", 100);
-    await receive("SOON", 50, "2026-09-01");
+    await receive("SOON", 50, inDays(30));
 
     await sell(60);
 
@@ -109,8 +124,8 @@ describe("batch inventory — FEFO allocation", () => {
 
   it("FIFO products consume oldest-received first, ignoring expiry", async () => {
     const { receive, sell, remaining } = await batchSetup("FIFO");
-    await receive("FIRST", 30, "2026-12-31"); // later expiry, arrived first
-    await receive("SECOND", 30, "2026-09-30");
+    await receive("FIRST", 30, inDays(365)); // later expiry, arrived first
+    await receive("SECOND", 30, inDays(60));
 
     await sell(40);
 
@@ -119,9 +134,9 @@ describe("batch inventory — FEFO allocation", () => {
 
   it("spans three batches when needed", async () => {
     const { receive, sell, remaining } = await batchSetup();
-    await receive("A", 10, "2026-01-31");
-    await receive("B", 10, "2026-02-28");
-    await receive("C", 10, "2026-03-31");
+    await receive("A", 10, inDays(30));
+    await receive("B", 10, inDays(60));
+    await receive("C", 10, inDays(90));
 
     await sell(25);
 
@@ -131,7 +146,7 @@ describe("batch inventory — FEFO allocation", () => {
   it("refuses to sell more than the batches hold, and writes nothing", async () => {
     const { company, product, location, receive, sell, remaining } =
       await batchSetup();
-    await receive("A", 10, "2026-09-30");
+    await receive("A", 10, inDays(30));
 
     await expectAppError(sell(11), 400);
 
@@ -145,8 +160,8 @@ describe("batch inventory — FEFO allocation", () => {
 
   it("re-receiving the same batch number tops up the existing lot", async () => {
     const { receive, remaining } = await batchSetup();
-    await receive("SAME", 10, "2026-09-30");
-    await receive("SAME", 5, "2026-09-30");
+    await receive("SAME", 10, inDays(30));
+    await receive("SAME", 5, inDays(30));
 
     expect(await remaining()).toEqual({ SAME: 15 });
 
@@ -201,8 +216,8 @@ describe("batch inventory — ledger agreement", () => {
     // what's on the shelf.
     const { company, product, location, receive, sell, remaining } =
       await batchSetup();
-    await receive("A", 100, "2026-09-30");
-    await receive("B", 50, "2026-12-31");
+    await receive("A", 100, inDays(30));
+    await receive("B", 50, inDays(120));
     await sell(120);
 
     const batchTotal = Object.values(await remaining()).reduce(
@@ -218,8 +233,8 @@ describe("batch inventory — ledger agreement", () => {
 
   it("records which lots a movement drew from", async () => {
     const { receive, sell } = await batchSetup();
-    await receive("A", 100, "2026-09-30");
-    await receive("B", 100, "2026-12-31");
+    await receive("A", 100, inDays(30));
+    await receive("B", 100, inDays(120));
     const sale = await sell(120);
 
     const allocations = await prisma.stockMovementBatch.findMany({
@@ -245,7 +260,7 @@ describe("batch inventory — transfers and cancellations", () => {
     const dest = await prisma.location.create({
       data: { companyId: company.id, name: "Cold Store" },
     });
-    await receive("A", 100, "2026-09-30");
+    await receive("A", 100, inDays(30));
 
     await stockService.transfer(company.id, user.id, {
       productId: product.id,
@@ -274,8 +289,8 @@ describe("batch inventory — transfers and cancellations", () => {
   it("cancelling an issued invoice returns stock to its original lots", async () => {
     const { company, user, product, location, receive, remaining } =
       await batchSetup();
-    await receive("A", 100, "2026-09-30");
-    await receive("B", 100, "2026-12-31");
+    await receive("A", 100, inDays(30));
+    await receive("B", 100, inDays(120));
 
     const inv = await invService.createInvoice(company.id, user.id, {
       customerName: "Walk-in",
@@ -300,8 +315,8 @@ describe("batch inventory — transfers and cancellations", () => {
   it("issuing an invoice for a batch product allocates FEFO", async () => {
     const { company, user, product, location, receive, remaining } =
       await batchSetup();
-    await receive("LATER", 50, "2026-12-31");
-    await receive("SOONER", 50, "2026-09-30");
+    await receive("LATER", 50, inDays(120));
+    await receive("SOONER", 50, inDays(30));
 
     const inv = await invService.createInvoice(company.id, user.id, {
       customerName: "Walk-in",
@@ -322,7 +337,7 @@ describe("batch inventory — concurrency (builds on P0 locks)", () => {
     // shape of the P0 oversell bug. It is safe only because it happens inside
     // lockStock, which is keyed on (company, product, location).
     const { company, product, location, receive, sell } = await batchSetup();
-    await receive("ONLY", 10, "2026-09-30");
+    await receive("ONLY", 10, inDays(30));
 
     const results = await Promise.allSettled([sell(8), sell(7)]);
     const ok = results.filter((r) => r.status === "fulfilled").length;
