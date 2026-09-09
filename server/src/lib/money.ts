@@ -99,6 +99,93 @@ export function invoiceTotalDecimal(inv: {
     .toDecimalPlaces(2);
 }
 
+/**
+ * REVENUE from an invoice: what the business actually earned (BUG-15).
+ *
+ * This is NOT the invoice total. The total is what the customer pays, and on
+ * a GST invoice part of that is tax collected on the government's behalf —
+ * money that passes through the till and back out again. Counting it as
+ * revenue overstates the top line and makes the margin percentage nonsense.
+ *
+ * The Reports page showed both figures at once and called them both
+ * "Revenue": Profitability said ₹310 and Sales said ₹340 for the same period,
+ * because one summed line values and the other summed invoice totals. Each was
+ * internally defensible; side by side they simply looked broken.
+ *
+ * The rule now: revenue is what was billed for the GOODS — after discount,
+ * before tax. Both regimes reduce to that:
+ *
+ *   GST  → the sum of `taxableValue`, which already has the discount
+ *          apportioned across the lines
+ *   FLAT → subtotal − discount, since the stored `taxRate` sits on top
+ *
+ * Read from the stamped values for the same reason invoiceTotalDecimal is: an
+ * issued invoice's figures do not move when a rate changes later.
+ */
+export function invoiceRevenueDecimal(inv: {
+  taxMode?: string | null;
+  taxRate: Decimal | null;
+  discount: Decimal | null;
+  lines: {
+    quantity: Decimal;
+    unitPrice: Decimal;
+    taxableValue?: Decimal | null;
+  }[];
+}): Decimal {
+  if (inv.taxMode === "GST") {
+    return inv.lines
+      .reduce((sum, l) => sum.plus(l.taxableValue ?? new D(0)), new D(0))
+      .toDecimalPlaces(2);
+  }
+  const subtotal = lineSubtotal(inv.lines);
+  return Prisma.Decimal.max(
+    new D(0),
+    subtotal.minus(inv.discount ?? new D(0))
+  ).toDecimalPlaces(2);
+}
+
+/**
+ * Revenue PER LINE, aligned to `inv.lines`, on the same basis as
+ * `invoiceRevenueDecimal` — so a per-product report always sums back to the
+ * invoice-level figure instead of nearly doing so.
+ *
+ * On a FLAT invoice the discount is one amount off the whole invoice, so it is
+ * apportioned across the lines in proportion to their value — the same way
+ * computeInvoiceGst apportions it before charging tax. The last line absorbs
+ * the rounding remainder, or a ₹10 discount across three lines comes to ₹9.99
+ * and the report stops footing.
+ */
+export function lineRevenues(inv: {
+  taxMode?: string | null;
+  discount: Decimal | null;
+  lines: {
+    quantity: Decimal;
+    unitPrice: Decimal;
+    taxableValue?: Decimal | null;
+  }[];
+}): Decimal[] {
+  if (inv.taxMode === "GST") {
+    return inv.lines.map((l) => l.taxableValue ?? new D(0));
+  }
+
+  const values = inv.lines.map((l) =>
+    l.unitPrice.times(l.quantity).toDecimalPlaces(2)
+  );
+  const subtotal = values.reduce((s, v) => s.plus(v), new D(0));
+  const discount = inv.discount ?? new D(0);
+  if (discount.isZero() || subtotal.lessThanOrEqualTo(0)) return values;
+
+  let spread = new D(0);
+  return values.map((v, i) => {
+    const isLast = i === values.length - 1;
+    const share = isLast
+      ? discount.minus(spread)
+      : discount.times(v).dividedBy(subtotal).toDecimalPlaces(2);
+    spread = spread.plus(share);
+    return Prisma.Decimal.max(new D(0), v.minus(share));
+  });
+}
+
 /** Sum of an invoice's lines, before discount and tax. */
 export function lineSubtotal(
   lines: { quantity: Decimal; unitPrice: Decimal }[]

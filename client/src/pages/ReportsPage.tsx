@@ -113,6 +113,8 @@ type SalesReport = {
     revenue: number;
     returned: number;
     grossRevenue: number;
+    /** What was BILLED, tax included — a real figure, but not revenue. */
+    invoiced: number;
     invoices: number;
   };
   byProduct: {
@@ -1248,13 +1250,23 @@ export function ReportsPage() {
                 <div className="mt-1 text-2xl font-black tracking-tight text-[var(--accent)]">
                   {formatMoney(sales.totals.revenue, currency, 0)}
                 </div>
-                {sales.totals.returned > 0 && (
-                  <div className="text-[10px] font-semibold text-[var(--muted)]">
-                    {formatMoney(sales.totals.grossRevenue, currency, 0)} billed
-                    less {formatMoney(sales.totals.returned, currency, 0)}{" "}
-                    returned
-                  </div>
-                )}
+                {/* Say what this figure IS, since the obvious guess is wrong:
+                    it excludes tax, which is collected for the government and
+                    is not the shop's money. Showing the billed amount next to
+                    it stops the two being confused (BUG-15). */}
+                <div className="text-[10px] font-semibold text-[var(--muted)]">
+                  excludes tax
+                  {sales.totals.invoiced > sales.totals.revenue && (
+                    <> · {formatMoney(sales.totals.invoiced, currency, 0)} billed</>
+                  )}
+                  {sales.totals.returned > 0 && (
+                    <>
+                      {" "}
+                      · less {formatMoney(sales.totals.returned, currency, 0)}{" "}
+                      returned
+                    </>
+                  )}
+                </div>
               </div>
               <div className={`${cardClass} p-4`}>
                 <div className="text-xs font-bold uppercase tracking-wide text-[var(--muted)]">

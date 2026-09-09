@@ -21,7 +21,11 @@ import {
 import { asyncHandler, AppError } from "../../middleware/error.js";
 import { requireAuth, type AuthRequest } from "../../middleware/auth.js";
 import { grandTotal } from "../invoices/inv.service.js";
-import { invoiceTotalDecimal } from "../../lib/money.js";
+import {
+  invoiceTotalDecimal,
+  invoiceRevenueDecimal,
+  lineRevenues,
+} from "../../lib/money.js";
 import { grossProfit } from "../../lib/costing.js";
 import { reorderReport } from "../reorder/reorder.service.js";
 import {
@@ -429,6 +433,7 @@ reportsRouter.get(
       { name: string; invoices: number; revenue: number }
     >();
     let totalRevenue = 0;
+    let totalInvoiced = 0;
     let totalReturned = 0;
 
     for (const inv of invoices) {
@@ -442,17 +447,33 @@ reportsRouter.get(
       const returns = bucket
         ? summariseInvoiceReturns(inv, bucket.lines, bucket.refunds)
         : null;
-      // The ACTUAL money for this invoice — after discount, plus tax — same
-      // as the invoice total the customer sees.
-      //
-      // Routed by taxMode since P2-3. Recomputing a GST invoice here would be
-      // the worst place to get it wrong: reported revenue would drift away
-      // from the invoices it is supposed to summarise, and the two would never
-      // reconcile.
+      /**
+       * REVENUE, not the invoice total (BUG-15).
+       *
+       * This used to sum invoice totals, which on a GST invoice includes tax
+       * collected for the government — money that passes through the till and
+       * straight back out. So this card read ₹340 while Profitability, three
+       * cards down the same page, read ₹310 for the same period. Both were
+       * defensible alone and the pair was indefensible.
+       *
+       * `invoiceRevenueDecimal` is now the single definition: billed for the
+       * GOODS, after discount, before tax — read from the stamped values, so
+       * a rate change next April cannot move a figure reported today.
+       *
+       * The tax-inclusive figure is still reported, as `invoiced`, because
+       * "how much did we bill" is a real question — it just isn't revenue.
+       */
+      const invRevenue = Number(invoiceRevenueDecimal(inv));
       const invTotal = Number(invoiceTotalDecimal(inv));
       // NET revenue: billed minus what came back, at the same basis.
-      const invReturned = Number(returns?.returnedAmount ?? 0);
-      totalRevenue += invTotal - invReturned;
+      // Returns are valued at the invoice's basis, so scale them to the
+      // revenue basis too — otherwise a return would subtract tax-inclusive
+      // money from a tax-exclusive figure.
+      const invReturnedGross = Number(returns?.returnedAmount ?? 0);
+      const invReturned =
+        invTotal > 0 ? invReturnedGross * (invRevenue / invTotal) : 0;
+      totalRevenue += invRevenue - invReturned;
+      totalInvoiced += invTotal;
       totalReturned += invReturned;
 
       const c = byCustomer.get(inv.customerName) ?? {
@@ -461,20 +482,23 @@ reportsRouter.get(
         revenue: 0,
       };
       c.invoices += 1;
-      c.revenue += invTotal - invReturned;
+      c.revenue += invRevenue - invReturned;
       byCustomer.set(inv.customerName, c);
 
-      for (const l of inv.lines) {
+      // Per-line revenue on the SAME basis as the invoice figure above, so
+      // the product breakdown sums back to the total instead of nearly doing
+      // so. lineRevenues apportions a flat discount and reads the stamped
+      // taxable value on a GST invoice.
+      const perLine = lineRevenues(inv);
+
+      inv.lines.forEach((l, i) => {
         const lineSub = Number(l.unitPrice.times(l.quantity));
-        // Spread the invoice's discount/tax across lines by their share of
-        // the subtotal, so per-product revenue sums back to the invoice total.
-        const rev = subtotal > 0 ? invTotal * (lineSub / subtotal) : 0;
+        const rev = Number(perLine[i] ?? 0);
 
         // The returned slice of this line, valued on exactly the same basis —
         // so "units" and "revenue" stay two views of one number.
         const retQty = Number(returns?.quantityByLine.get(l.id) ?? 0);
-        const retSub = retQty * Number(l.unitPrice);
-        const retRev = subtotal > 0 ? invTotal * (retSub / subtotal) : 0;
+        const retRev = lineSub > 0 ? rev * ((retQty * Number(l.unitPrice)) / lineSub) : 0;
 
         const p = byProduct.get(l.productId) ?? {
           productId: l.productId,
@@ -492,16 +516,19 @@ reportsRouter.get(
         p.returnedUnits += retQty;
         p.returnedRevenue += retRev;
         byProduct.set(l.productId, p);
-      }
+      });
     }
 
     res.json({
       totals: {
-        // `revenue` is NET of returns — the figure every other screen shows.
+        // NET of returns, and NET OF TAX — the same basis Profitability uses,
+        // so the two cards on this page can no longer disagree (BUG-15).
         revenue: round2(totalRevenue),
         // Kept alongside so the reduction is visible rather than mysterious.
         returned: round2(totalReturned),
         grossRevenue: round2(totalRevenue + totalReturned),
+        /** What was BILLED, tax included. A real figure, just not revenue. */
+        invoiced: round2(totalInvoiced),
         invoices: invoices.length,
       },
       byProduct: [...byProduct.values()]
@@ -638,11 +665,17 @@ reportsRouter.get(
         new Prisma.Decimal(0)
       );
 
-      for (const l of inv.lines) {
+      // Same per-line revenue basis as /sales (BUG-15): after discount,
+      // before tax. This report already excluded tax; what it missed was the
+      // discount, so a discounted invoice reported more revenue than it
+      // earned and the margin came out flattering.
+      const perLine = lineRevenues(inv);
+
+      inv.lines.forEach((l, i) => {
         const row =
           byProduct.get(l.productId) ??
           blankRow(l.productId, l.product.sku, l.product.name);
-        row.revenue = row.revenue.plus(l.unitPrice.times(l.quantity));
+        row.revenue = row.revenue.plus(perLine[i] ?? new Prisma.Decimal(0));
 
         // Value returned off this line, at the price it sold for. This report
         // works on line subtotals (not invoice totals), so the returned slice
@@ -655,7 +688,7 @@ reportsRouter.get(
           );
         }
         byProduct.set(l.productId, row);
-      }
+      });
     }
 
     for (const m of sales) {
@@ -1382,15 +1415,27 @@ reportsRouter.get(
     const returnedRevenue = periodInvoices.reduce((s, inv) => {
       const bucket = periodReturns.get(inv.id);
       if (!bucket) return s;
+      const gross = summariseInvoiceReturns(
+        inv,
+        bucket.lines,
+        bucket.refunds
+      ).returnedAmount;
+      // Returns are measured at the invoice's own (tax-inclusive) basis, so
+      // scale them before subtracting from a tax-exclusive figure.
+      const total = invoiceTotalDecimal(inv);
+      if (total.lessThanOrEqualTo(0)) return s;
       return s.plus(
-        summariseInvoiceReturns(inv, bucket.lines, bucket.refunds).returnedAmount
+        gross.times(invoiceRevenueDecimal(inv)).dividedBy(total)
       );
     }, zero);
 
     // NET revenue. Reporting the gross figure while the goods sit back on our
     // own shelf is the reconciliation failure this fix is about.
+    // Revenue, not billings (BUG-15) — the same definition the Sales and
+    // Profitability cards use, so the dashboard cannot disagree with the page
+    // it summarises.
     const revenue = periodInvoices
-      .reduce((s, inv) => s.plus(invoiceTotalDecimal(inv)), zero)
+      .reduce((s, inv) => s.plus(invoiceRevenueDecimal(inv)), zero)
       .minus(returnedRevenue);
 
     // COGS from costAtTime — the cost stamped on each sale when it happened,

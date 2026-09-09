@@ -2907,3 +2907,127 @@ together; a draft stays a draft; the list nets returns as the invoice does.
    BUG-8 rule — working exactly as designed, on scenery that was wrong.
 3. The desktop file bridge reported writes as successful while the old content
    was still on disk, twice. Verify a write by reading the file back.
+
+## BUG-14 (P1) — a first delivery could value stock at ₹0
+
+**Found by:** receiving 67.5 kg of a brand-new product with the optional
+**Unit cost** left blank. The valuation report then showed **₹0 of cost against
+₹5,200 of retail**, and the first sale of it reported a 100% margin.
+
+**Root cause — a fallback chain that stopped one step too early.** A purchase
+with no stated price fell back to `product.avgCost`, which is exactly zero on a
+product that has never been received before. So the FIRST delivery of anything
+— the one that establishes the cost — was the one guaranteed to be valued at
+nothing. Nothing warned anyone, because "unit cost" is an optional field and
+leaving it blank looks like an ordinary thing to do.
+
+**Fix — three answers, in order of authority:**
+
+1. what the user typed for THIS delivery — always wins
+2. the running weighted average, when there **is** one
+3. the product's reference cost price
+
+`costPrice` is explicitly not accounting-grade — it is a number somebody typed
+on the product form, and `avgCost` supersedes it the moment one exists. But
+"what the user said this costs" is a far better estimate than "free", and it is
+visible and editable, whereas a silent zero is neither.
+
+With no cost on file anywhere it still records zero, and that is deliberate:
+there is nothing to infer from, and inventing a figure would be worse than
+reporting none. What changed is that the Stock form now says so BEFORE you
+submit — the hint under Unit cost reads *"blank = ₹50 (cost price)"*, or
+*"no cost on file — enter one or this stock is valued at ₹0"*.
+
+## BUG-15 (P1) — two different revenues on one page
+
+**Found by:** reading the Reports page top to bottom. The **Sales** card said
+₹340 and the **Profitability** card said ₹310 for the same period, on the same
+screen. Per product: QA Rice ₹200 vs ₹210, A4 Register ₹110 vs ₹129.80.
+
+**Root cause — two definitions, neither written down.** Sales summed invoice
+TOTALS (tax included, discount included). Profitability summed raw line values
+(tax excluded, discount **ignored**). Each was defensible alone. The pair was
+not, and there was no label on either to say which question it answered.
+
+**The fix is not "make them match" — it is deciding which is right.**
+
+**GST is not revenue.** It is collected on the government's behalf; it passes
+through the till and back out again. Counting it inflates the top line and
+makes the margin percentage meaningless. And a discount genuinely reduces what
+was earned, so ignoring it — as Profitability did — reports revenue the
+business never received.
+
+So revenue now has ONE definition, in `invoiceRevenueDecimal`: **billed for the
+GOODS, after discount, before tax.** Both regimes reduce to it —
+
+- GST → the sum of `taxableValue`, which already has the discount apportioned
+- FLAT → subtotal − discount, since the stored `taxRate` sits on top
+
+Read from the stamped values, for the same reason `invoiceTotalDecimal` is: a
+rate change next April must not move a figure reported today.
+
+Used by **/reports/sales**, **/reports/profitability** and the **dashboard**,
+so the three cards cannot disagree. The tax-inclusive figure is still reported
+by /sales as `invoiced`, because "how much did we bill" is a real question —
+it just isn't revenue. The Sales card now reads *"excludes tax · ₹840 billed"*
+so nobody has to guess which number they are looking at.
+
+`lineRevenues()` gives the same basis per line, apportioning a flat discount
+across lines with the last one absorbing the rounding remainder. A per-product
+breakdown that NEARLY sums to the total is worse than none — it invites someone
+to reconcile it and lose an afternoon.
+
+**Returns are scaled before subtracting.** They are recorded at the invoice's
+own tax-inclusive basis, so taking them off a tax-exclusive figure without
+scaling would have quietly reintroduced the same class of mismatch.
+
+**Tests:** `reports/revenue-basis.test.ts` (10). They assert AGREEMENT between
+the three cards rather than three separate magic numbers, because agreement is
+the property that broke: Sales == Profitability; the dashboard == the page it
+summarises; per-product sums back to the total exactly; a discount reduces
+revenue; `lineRevenues` always sums to `invoiceRevenueDecimal`. Plus the
+costing half: a first delivery with no unit cost uses the cost price; a stated
+cost still wins; a running average beats the reference price once it exists;
+and with nothing on file it is still zero.
+
+✅ **Suite green — 37 files, 558 tests** (548 before + 10 new).
+
+**A note on my own test failures this round.** Three of the four were my
+scenery, not the code: a fixture that set a GST rate but not `precision` (so
+the BUG-8 rule correctly refused 2.5), and a test that called
+`/api/reports/summary` — the MOVEMENT summary — when the dashboard lives at
+`/api/reports/dashboard`, and got a valid 200 with a different shape. Worth
+remembering that a 200 is not evidence you hit the endpoint you meant.
+
+---
+
+# Still open from the manual testing round
+
+Fixed: BUG-11 (POS charged more than it quoted), BUG-12 (GST invoices ₹0 in
+the list), BUG-13 (PAID badge on an unpaid invoice), BUG-14, BUG-15.
+
+**P2 — data integrity and gaps**
+- **Receive PO has no expiry date field**, though the API accepts one. Goods
+  received through the proper purchasing route always create a never-expires
+  lot, so FEFO sorts them last and the expiry report never sees them.
+- **Stock count sheets ignore batches.** A batch-tracked product with 3 lots
+  gets one line and an empty BATCH column; completing it posts a lot-less
+  adjustment, re-opening the BUG-5 gap.
+- **GSTIN is not validated against the business state.** Settings holds
+  `22AAAA0000A1Z5` (22 = Chhattisgarh) with state `08 — Rajasthan`. The first
+  two digits must match; every GST invoice raised is non-compliant.
+- **Each failed POS sale leaves a CANCELLED invoice** and burns a number.
+  Correct in that the reservation is released, but a busy till accumulates
+  cancelled invoices and gaps in the sequence.
+- **Reorder suggests every product for a location that never stocked it** —
+  all 5 rows were Godown at on-hand 0, from the product-level threshold.
+- **FEFO/FIFO cannot be chosen in the UI** though it is a per-product setting.
+
+**P3 — display**
+- Dashboard: "STOCK VALUE (COST) ₹19,509 / sold 1 units / ↓100% vs last month"
+  — a units caption under a value metric, and 1 vs 534 is −99.8%, not 100%.
+- Different units of measure are added together: "UNITS SOLD 3.5" mixes 2.5 kg
+  with 1 pcs; POS says "2.5 items" for 2.5 kg.
+- Supplier email uses the browser's native validation bubble, not the app's own
+  inline style.
+- Cancelling a stock count has no confirmation step.

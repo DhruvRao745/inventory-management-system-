@@ -251,19 +251,47 @@ export async function createMovement(
     // between your own shelves must not change what it cost you.
     let costAtTime: Prisma.Decimal | null = null;
     switch (input.type) {
-      case "PURCHASE":
-        // A purchase without a stated price falls back to the running
-        // average — better than pretending the goods were free.
+      case "PURCHASE": {
+        /**
+         * What did these goods cost? (BUG-14)
+         *
+         * Three answers, in order of authority:
+         *
+         *   1. what the user typed for THIS delivery — always wins
+         *   2. the running weighted average, when there IS one
+         *   3. the product's reference cost price
+         *
+         * The old code stopped at (2) and used `avgCost` even when it was
+         * zero — which is exactly what a brand-new product has. So the first
+         * delivery of a new product entered stock valued at nothing: the
+         * valuation report showed ₹0 of cost against ₹5,200 of retail, and
+         * the first sale of it reported a 100% margin. Nothing warned anyone,
+         * because "unit cost" is an optional field and leaving it blank looks
+         * like an ordinary thing to do.
+         *
+         * `costPrice` is explicitly NOT accounting-grade — it is a number
+         * somebody typed on the product form, and `avgCost` supersedes it the
+         * moment there is one. But "what the user said this costs" is a far
+         * better estimate than "free", and it is visible and editable on the
+         * product, whereas a silent zero is neither.
+         */
+        const stated =
+          input.unitCost !== undefined
+            ? new Prisma.Decimal(input.unitCost)
+            : null;
+        const fallback = product.avgCost.greaterThan(0)
+          ? product.avgCost
+          : product.costPrice;
+
         costAtTime = await costStockIn(
           tx,
           companyId,
           input.productId,
           signedQuantity,
-          input.unitCost !== undefined
-            ? new Prisma.Decimal(input.unitCost)
-            : product.avgCost
+          stated ?? fallback
         );
         break;
+      }
       case "SALE":
       case "RETURN_OUT":
         costAtTime = await costStockOut(

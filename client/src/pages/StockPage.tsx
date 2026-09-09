@@ -333,7 +333,23 @@ export function StockPage() {
 
             {isIncoming && (
               <div className="grid grid-cols-2 gap-4">
-                <Field label="Unit cost" hint="optional">
+                <Field
+                  label="Unit cost"
+                  /* Say what happens if it's left blank (BUG-14). "Optional"
+                     was true but unhelpful: the stock still gets valued at
+                     SOMETHING, and a blank field used to mean ₹0 on a product
+                     with no history — inventory worth nothing, and a first
+                     sale showing 100% margin. */
+                  hint={
+                    selectedProduct
+                      ? qtyNum(selectedProduct.avgCost) > 0
+                        ? `blank = ₹${selectedProduct.avgCost} (current average)`
+                        : qtyNum(selectedProduct.costPrice) > 0
+                          ? `blank = ₹${selectedProduct.costPrice} (cost price)`
+                          : "no cost on file — enter one or this stock is valued at ₹0"
+                      : "optional"
+                  }
+                >
                   <Input
                     type="number"
                     min="0"
