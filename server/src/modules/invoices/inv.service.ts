@@ -7,6 +7,8 @@ import { Prisma, type InvoiceSource } from "@prisma/client";
 import { prisma } from "../../lib/prisma.js";
 import {
   invoiceReturnSummary,
+  loadSettledReturns,
+  summariseInvoiceReturns,
   netQuantity,
 } from "../../lib/sales-returns.js";
 import { AppError } from "../../middleware/error.js";
@@ -628,13 +630,53 @@ export async function listInvoices(companyId: string, q: ListInvoiceQuery) {
       skip: q.skip,
       include: {
         location: { select: { name: true } },
-        lines: { select: { quantity: true, unitPrice: true } },
+        // Payments, so the list can show what the money says rather than a
+        // stored flag (BUG-13).
+        payments: { select: { amount: true } },
+        lines: {
+          select: {
+            // id + productId let return lines be matched back to the invoice
+            // line they came off, so the list nets returns exactly as the
+            // invoice does.
+            id: true,
+            productId: true,
+            quantity: true,
+            unitPrice: true,
+            // The STAMPED GST columns (BUG-12). Without these,
+            // invoiceTotalDecimal takes its GST branch and sums a row of
+            // nulls, so every GST invoice in the list read ₹0 while its own
+            // detail page read ₹210. The comment below always described this
+            // correctly; the query simply never fetched the columns it
+            // describes.
+            taxableValue: true,
+            cgstAmount: true,
+            sgstAmount: true,
+            igstAmount: true,
+          },
+        },
       },
     }),
     prisma.invoice.count({ where }),
   ]);
 
-  const rows = items.map((inv) => ({
+  // Returns settled against this page of invoices, so a net figure here agrees
+  // with the one on the invoice itself. One grouped read for the whole page.
+  const returnsByInvoice = await loadSettledReturns(
+    prisma,
+    companyId,
+    items.map((i) => i.id)
+  );
+
+  const rows = items.map((inv) => {
+    const bucket = returnsByInvoice.get(inv.id);
+    const ret = bucket
+      ? summariseInvoiceReturns(inv, bucket.lines, bucket.refunds)
+      : null;
+    const money = summarisePayments(invoiceTotalDecimal(inv), inv.payments, {
+      returnedAmount: ret?.returnedAmount,
+      refundedAmount: ret?.refundedAmount,
+    });
+    return {
     id: inv.id,
     number: inv.number,
     status: inv.status,
@@ -652,7 +694,25 @@ export async function listInvoices(companyId: string, q: ListInvoiceQuery) {
     // round — Number() per line, then multiplying — is how 2.5 kg × ₹33.33
     // quietly becomes ₹83.32499999999999.
     total: Number(invoiceTotalDecimal(inv)),
-  }));
+
+    /**
+     * What the MONEY says, derived from the payment rows (BUG-13).
+     *
+     * `status` above is a workflow flag — it says whether the document is a
+     * draft, issued or cancelled, and it is only ever moved by an action
+     * someone takes. It drifted: an invoice sat in the list as PAID with no
+     * payments against it at all, and simultaneously appeared in the
+     * outstanding-balances report owing ₹59.
+     *
+     * Both cannot be true, and the payment rows are the ones that record real
+     * money, so they win. The flag keeps the job it is good at (draft /
+     * cancelled) and stops being asked a question it cannot answer.
+     */
+    paymentStatus: money.paymentStatus,
+    balance: Number(money.balanceAmount),
+    netTotal: Number(money.netTotalAmount),
+    };
+  });
 
   return { items: rows, total, take: q.take, skip: q.skip };
 }

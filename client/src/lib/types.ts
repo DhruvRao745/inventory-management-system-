@@ -164,6 +164,7 @@ export type InvoiceStatus = "DRAFT" | "ISSUED" | "PAID" | "CANCELLED";
 export type InvoiceRow = {
   id: string;
   number: number;
+  /** Workflow state: draft, issued, cancelled. NOT whether it was paid. */
   status: InvoiceStatus;
   customerName: string;
   location: string;
@@ -171,7 +172,27 @@ export type InvoiceRow = {
   createdAt: string;
   itemCount: number;
   total: number;
+  /** Derived from the payment rows — the truth about money (BUG-13). */
+  paymentStatus: PaymentStatus;
+  balance: number;
+  netTotal: number;
 };
+
+/**
+ * The badge to show for an invoice.
+ *
+ * DRAFT and CANCELLED are states of the DOCUMENT, and no payment figure can
+ * override them. Everything else is a question about money, and the answer
+ * comes from the payments — never from `Invoice.status`, which drifted and
+ * left the list saying PAID while the invoice itself said ₹59 outstanding.
+ */
+export function invoiceBadge(
+  status: InvoiceStatus,
+  paymentStatus: PaymentStatus | undefined
+): string {
+  if (status === "DRAFT" || status === "CANCELLED") return status;
+  return paymentStatus ?? status;
+}
 
 export type InvoiceLine = {
   id: string;
@@ -289,6 +310,23 @@ export type Invoice = {
     byCondition: { SELLABLE: string; DAMAGED: string; QUARANTINE: string };
     fullyReturned: boolean;
   };
+};
+
+/**
+ * What POST /pos/quote answers: what this basket costs, tax included.
+ *
+ * The till shows this rather than summing prices itself — computing GST in
+ * the browser would be the second tax engine lib/gst.ts refuses to have, and
+ * showing a pre-tax figure on a "Take ₹…" button is what made the drawer come
+ * up short on every GST sale (BUG-11).
+ */
+export type PosQuote = {
+  subtotal: number;
+  tax: number;
+  total: number;
+  taxed: boolean;
+  /** A line has no GST rate decided, so no honest total exists yet. */
+  unrated?: boolean;
 };
 
 export function invNumber(n: number): string {

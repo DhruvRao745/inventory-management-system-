@@ -40,7 +40,20 @@ import {
 } from "../invoices/inv.service.js";
 import { recordPayment } from "../payments/payment.service.js";
 import { invoiceTotalDecimal } from "../../lib/money.js";
-import type { PosSaleInput } from "./pos.schemas.js";
+import { Prisma } from "@prisma/client";
+import { computeInvoiceGst } from "../../lib/gst.js";
+import type { PosSaleInput, PosQuoteInput } from "./pos.schemas.js";
+
+/** What a basket will cost — the figure the cashier says out loud (BUG-11). */
+export type PosQuoteResult = {
+  subtotal: number;
+  tax: number;
+  total: number;
+  /** Whether any tax is included in `total`. */
+  taxed: boolean;
+  /** True when a line has no GST rate decided, so no honest total exists. */
+  unrated?: boolean;
+};
 
 export type PosSaleResult = {
   invoice: Awaited<ReturnType<typeof getInvoice>>;
@@ -213,4 +226,121 @@ export async function posSale(
 
 function invoiceLabel(n: number) {
   return `INV-${String(n).padStart(4, "0")}`;
+}
+
+/**
+ * What will this basket cost, including tax? (BUG-11)
+ *
+ * WHY THIS EXISTS
+ *
+ * The till used to show the pre-tax subtotal on its "Take ₹…" button while the
+ * invoice charged the tax-inclusive total. On a ₹200 basket at 5% GST the
+ * cashier was told to collect ₹200 and the books recorded ₹210 received — the
+ * drawer came up short on every GST sale, and nothing on screen said why.
+ *
+ * The screen cannot fix that by itself. Working GST out in the browser would
+ * be a second tax engine, and there is a comment in `client/src/lib/gst.ts`
+ * explaining exactly why there must not be one. So the till asks the server,
+ * and the server answers with the SAME function that will stamp the invoice a
+ * moment later — `computeInvoiceGst`. One engine, asked twice.
+ *
+ * WRITES NOTHING. No invoice, no reservation, no number burned. A price check
+ * is not a sale, and a cashier who changes their mind must not leave a trail.
+ *
+ * The prices come from the catalogue for the same reason they do in posSale:
+ * a total quoted from what the browser happened to have loaded is a total that
+ * can disagree with what is charged.
+ */
+export async function posQuote(
+  companyId: string,
+  input: PosQuoteInput
+): Promise<PosQuoteResult> {
+  const empty: PosQuoteResult = {
+    subtotal: 0,
+    tax: 0,
+    total: 0,
+    taxed: false,
+  };
+  if (input.lines.length === 0) return empty;
+
+  const [products, company] = await Promise.all([
+    prisma.product.findMany({
+      where: { id: { in: input.lines.map((l) => l.productId) }, companyId },
+      select: {
+        id: true,
+        name: true,
+        sellingPrice: true,
+        gstRate: true,
+        isActive: true,
+      },
+    }),
+    prisma.company.findUnique({
+      where: { id: companyId },
+      select: { stateCode: true },
+    }),
+  ]);
+  const byId = new Map(products.map((p) => [p.id, p]));
+
+  const priced = input.lines.map((l) => {
+    const p = byId.get(l.productId);
+    if (!p) throw new AppError(400, "Unknown product on this sale");
+    return {
+      quantity: new Prisma.Decimal(l.quantity),
+      unitPrice: new Prisma.Decimal(l.unitPrice ?? Number(p.sellingPrice)),
+      gstRate:
+        l.gstRate !== undefined
+          ? new Prisma.Decimal(l.gstRate)
+          : p.gstRate,
+    };
+  });
+
+  const subtotal = priced
+    .reduce(
+      (s, l) => s.plus(l.unitPrice.times(l.quantity)),
+      new Prisma.Decimal(0)
+    )
+    .toDecimalPlaces(2);
+  const discount = new Prisma.Decimal(input.discount ?? 0);
+
+  // Not a GST sale: the subtotal (less any discount) IS what the customer
+  // pays, so there is nothing to work out and nothing to get wrong.
+  if (!input.useGst) {
+    const flat = subtotal
+      .minus(discount)
+      .plus(
+        input.taxRate
+          ? subtotal.minus(discount).times(input.taxRate).dividedBy(100)
+          : 0
+      )
+      .toDecimalPlaces(2);
+    return {
+      subtotal: Number(subtotal),
+      tax: Number(flat.minus(subtotal.minus(discount)).toDecimalPlaces(2)),
+      total: Number(flat),
+      taxed: Boolean(input.taxRate),
+    };
+  }
+
+  // A line with no rate decided is refused at the moment of sale, and the
+  // screen blocks it too. Quoting one would mean guessing a rate, which is the
+  // one thing this system will not do about tax — so say so instead.
+  if (priced.some((l) => l.gstRate === null)) {
+    return { ...empty, subtotal: Number(subtotal), unrated: true };
+  }
+
+  // A walk-in has no address, so the place of supply is our own state — the
+  // same answer resolvePlaceOfSupply gives when nothing else is known.
+  const breakup = computeInvoiceGst({
+    lines: priced,
+    discount,
+    sellerStateCode: company?.stateCode ?? null,
+    placeOfSupply: input.placeOfSupply ?? company?.stateCode ?? null,
+  });
+
+  return {
+    subtotal: Number(breakup.subtotal),
+    tax: Number(breakup.totalTax),
+    total: Number(breakup.grandTotal),
+    taxed: true,
+  };
 }

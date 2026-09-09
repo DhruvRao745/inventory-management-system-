@@ -2805,3 +2805,105 @@ suite never noticed, because the bug and the fixture were making the same
 mistake — both treated an expired lot as ordinary stock. A test that passes
 only because the code shares its error is not testing anything. Relative dates
 everywhere now.
+
+---
+
+# Round 2: bugs found by manual testing (Sept 2026)
+
+Claude drove the live site as a tester — product → stock → PO → receive → POS →
+invoice → return → reports → settings — and filed 15 faults. All six fixes from
+the first round verified working in production along the way. The three most
+serious are fixed below; the rest are listed at the end of this file.
+
+## BUG-11 (P1) — the till collected the wrong amount on GST sales
+
+**Found by:** ringing up 2.5 kg × ₹80 with "GST invoice" ticked. The header
+correctly read *TOTAL (BEFORE TAX) ₹200*, the button read **"Take ₹200"**, and
+the sale booked ₹210 with a ₹210 payment recorded. The cashier collects ₹200
+and the books say ₹210 arrived — **the drawer is short on every GST sale.** If
+the cashier instead types 200 as cash tendered, the invoice silently keeps a
+₹10 balance.
+
+**What made this interesting: the obvious fix was the wrong one.**
+`client/src/lib/gst.ts` states plainly that the browser must never compute tax,
+because a second implementation is a second thing to disagree with the invoice.
+That is correct and the fix had to respect it. But hiding the number ("Take
+payment") leaves a cashier with nothing to say out loud, which is worse at a
+counter than a wrong number is anywhere else.
+
+**Fix — ask the server, don't guess.** New `POST /api/pos/quote` runs the SAME
+`computeInvoiceGst` the invoice will run a moment later and **writes nothing**:
+no invoice, no reservation, no number burned. One engine, asked twice. Prices
+come from the catalogue, not from what the till sent, for the same reason
+`posSale` re-prices server-side — a total quoted from a stale tab is a total
+that can disagree with the charge.
+
+The screen now shows the tax-inclusive total, the button names the real figure,
+and change is computed against it — so the `(approx.)` hedge on change is gone.
+It was only ever approximate because it was measured against a pre-tax
+subtotal. The button also refuses to take cash while no confirmed total exists.
+
+A walk-in has no address, so the quote's place of supply is our own state —
+the same answer `resolvePlaceOfSupply` gives when nothing else is known.
+
+**Tests:** `pos/pos.quote.test.ts` (6). The one that matters: **a quote and the
+invoice that follows it produce the same number**, GST and non-GST. Plus:
+quoting writes nothing (asserted, not assumed); an empty basket quotes zero;
+an unrated product returns `unrated` rather than a guessed total; catalogue
+pricing beats what the till sent.
+
+## BUG-12 (P1) — every GST invoice showed ₹0 in the list
+
+The list said ₹0; the invoice's own page said ₹210. Non-GST invoices were fine.
+
+**Root cause, and a lesson about comments.** `listInvoices` selected only
+`quantity` and `unitPrice` from each line, so `invoiceTotalDecimal` took its
+GST branch and summed a row of nulls. The comment directly above it said *"a
+GST invoice sums the tax STAMPED on its lines"* — describing an intention the
+query had never supported. The comment was right and the code was wrong, and
+nothing could tell them apart.
+
+**Fix:** select the stamped columns. One line of query, and the comment becomes
+true.
+
+## BUG-13 (P1) — "PAID" on an invoice with nothing paid
+
+INV-0001 showed a **PAID** badge in the list and on its own header, while the
+payment panel on that same screen said **UNPAID · ₹0 paid · ₹59 balance** — and
+the invoice simultaneously appeared in the outstanding-balances report owing
+₹59. A GST invoice with a return against it showed **PAID** in the header and
+**OVERPAID** in the panel.
+
+**Root cause.** `Invoice.status` is a workflow flag that only moves when
+someone acts (`syncInvoiceStatus` runs on payment). Every money figure is
+derived from the payment rows. The badge was showing the flag, so a drifted
+flag became a confident wrong answer on the most visible part of the screen.
+
+**Fix.** `listInvoices` now returns a derived `paymentStatus`, `balance` and
+`netTotal` (netted against returns, so the list and the invoice cannot
+disagree). One `invoiceBadge()` helper decides what to display: **DRAFT and
+CANCELLED describe the DOCUMENT and always win; anything else is a question
+about money, answered by the payments.** Applied to the list, the detail header
+and the printed invoice.
+
+**What was deliberately NOT done: the stored status was left alone.** Rewriting
+INV-0001's flag to make the display agree would destroy the evidence of the
+drift and fix nothing. The test pins this — status stays `PAID`, the derived
+answer says `UNPAID`.
+
+**Tests:** `invoices/list-money.test.ts` (6) — a GST invoice's list total equals
+its detail total; flat-rate still matches; the forced drift (status PAID, no
+payments) reports UNPAID with the flag untouched; paying moves list and detail
+together; a draft stays a draft; the list nets returns as the invoice does.
+
+✅ **Suite green — 36 files, 548 tests** (536 before + 12 new).
+
+**Three self-inflicted delays worth remembering:**
+1. `summariseInvoiceReturns` matches return lines to invoice lines by id, so
+   ANY query feeding it needs `id` and `productId` in its select. Third time
+   that has bitten (payment.service, outstandingBalances, now listInvoices).
+2. Both new test fixtures set a GST rate and a price on the shared `Test
+   Widget` but not its `precision`, so a 2.5 quantity was rejected by the
+   BUG-8 rule — working exactly as designed, on scenery that was wrong.
+3. The desktop file bridge reported writes as successful while the old content
+   was still on disk, twice. Verify a write by reading the file back.

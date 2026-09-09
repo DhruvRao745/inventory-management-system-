@@ -39,7 +39,7 @@ import {
   SectionTitle,
 } from "../components/ui";
 import { ProductPicker } from "../components/ProductPicker";
-import type { Product, Location, Invoice } from "../lib/types";
+import type { Product, Location, Invoice, PosQuote } from "../lib/types";
 
 const PAYMENT_METHODS = ["CASH", "CARD", "UPI", "BANK_TRANSFER", "CHEQUE", "OTHER"] as const;
 type PaymentMethod = (typeof PAYMENT_METHODS)[number];
@@ -78,6 +78,16 @@ export function PosPage() {
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [result, setResult] = useState<SaleResult | null>(null);
+
+  /**
+   * What the server says this basket costs, tax included (BUG-11).
+   *
+   * Null while it is being fetched or when the basket is empty. The screen
+   * falls back to the pre-tax estimate below, but never PRESENTS that as the
+   * amount to collect — see `amountDue`.
+   */
+  const [quote, setQuote] = useState<PosQuote | null>(null);
+  const [quoting, setQuoting] = useState(false);
 
   const scanRef = useRef<HTMLInputElement>(null);
   const audioRef = useRef<AudioContext | null>(null);
@@ -204,10 +214,72 @@ export function PosPage() {
     0
   );
 
+  /**
+   * Ask the server what this basket actually costs.
+   *
+   * Every change to the basket, the price overrides or the GST toggle makes
+   * the previous answer stale, so the answer is cleared BEFORE the request
+   * goes out. A till that shows the previous basket's total for half a second
+   * is a till that will eventually have that figure read out to a customer.
+   *
+   * `cancelled` guards against answers arriving out of order — a fast scanner
+   * can put three requests in flight, and the last one to return is not
+   * necessarily the last one asked.
+   */
+  const basketKey = JSON.stringify(
+    basket.map((l) => [l.product.id, l.quantity, l.unitPrice])
+  );
+  useEffect(() => {
+    if (basket.length === 0 || !locationId) {
+      setQuote(null);
+      return;
+    }
+    let cancelled = false;
+    setQuote(null);
+    setQuoting(true);
+    api<PosQuote>("/pos/quote", {
+      method: "POST",
+      body: {
+        locationId,
+        useGst: useGst || undefined,
+        lines: basket.map((l) => ({
+          productId: l.product.id,
+          quantity: l.quantity,
+          ...(l.unitPrice !== null ? { unitPrice: l.unitPrice } : {}),
+        })),
+      },
+    })
+      .then((q) => {
+        if (!cancelled) setQuote(q);
+      })
+      .catch(() => {
+        // Deliberately silent. A failed price check is not a failed sale, and
+        // the sale itself will report anything genuinely wrong. What it must
+        // NOT do is leave a stale figure on screen, which the clear above
+        // already prevents.
+        if (!cancelled) setQuote(null);
+      })
+      .finally(() => {
+        if (!cancelled) setQuoting(false);
+      });
+    return () => {
+      cancelled = true;
+    };
+  }, [basketKey, useGst, locationId, basket.length]);
+
+  /**
+   * The number the cashier acts on: what the customer owes.
+   *
+   * Null means "not known yet" — and the screen says so rather than showing
+   * the pre-tax subtotal, which is how ₹200 came to be collected against a
+   * ₹210 invoice.
+   */
+  const amountDue = quote ? quote.total : useGst ? null : estimate;
+
   const tenderedNum = Number(tendered);
-  const changeEstimate =
-    tendered !== "" && !Number.isNaN(tenderedNum)
-      ? tenderedNum - estimate
+  const changeDue =
+    tendered !== "" && !Number.isNaN(tenderedNum) && amountDue !== null
+      ? tenderedNum - amountDue
       : null;
 
   /**
@@ -490,17 +562,30 @@ export function PosPage() {
       <div className="space-y-4">
         <div className={`${cardClass} p-5`}>
           <div className="text-xs font-black uppercase tracking-wide text-[var(--muted)]">
-            Total {useGst && <span>(before tax)</span>}
+            Total
           </div>
           {/* The number being read aloud to the customer, so it is the largest
-              thing on the screen. */}
+              thing on the screen — and, since BUG-11, the number the customer
+              is actually charged. It comes from the server's tax engine, not
+              from a sum this screen made up. */}
           <div className="text-4xl font-black tracking-tight text-[var(--text)]">
-            {formatMoney(estimate, currency)}
+            {amountDue !== null
+              ? formatMoney(amountDue, currency)
+              : quoting
+                ? "…"
+                : formatMoney(estimate, currency)}
           </div>
           <div className="mt-1 text-xs font-semibold text-[var(--muted)]">
             {basket.reduce((n, l) => n + l.quantity, 0)} item
             {basket.reduce((n, l) => n + l.quantity, 0) === 1 ? "" : "s"}
-            {useGst && " · tax is added by the invoice"}
+            {quote && quote.tax > 0 && (
+              <>
+                {" · "}
+                {formatMoney(quote.subtotal, currency)} + tax{" "}
+                {formatMoney(quote.tax, currency)}
+              </>
+            )}
+            {amountDue === null && !quoting && " · total not confirmed yet"}
           </div>
         </div>
 
@@ -546,20 +631,23 @@ export function PosPage() {
                   change once it has applied tax — showing a confident figure
                   here that the receipt then contradicts is worse than showing
                   a rough one. */}
-              {changeEstimate !== null && changeEstimate > 0 && (
+              {/* Change is now computed against the SAME total the customer is
+                  charged, so it no longer needs the "(approx.)" hedge it wore
+                  while it was measured against a pre-tax subtotal. */}
+              {changeDue !== null && changeDue > 0 && (
                 <div className="rounded-[6px] border-2 border-[var(--line)] bg-[var(--panel)] p-3">
                   <div className="text-xs font-black uppercase tracking-wide text-[var(--muted)]">
-                    Change (approx.)
+                    Change
                   </div>
                   <div className="text-2xl font-black text-emerald-500">
-                    {formatMoney(changeEstimate, currency)}
+                    {formatMoney(changeDue, currency)}
                   </div>
                 </div>
               )}
-              {changeEstimate !== null && changeEstimate < 0 && (
+              {changeDue !== null && changeDue < 0 && (
                 <p className="text-sm font-bold text-amber-500">
-                  Short by {formatMoney(-changeEstimate, currency)} — this will
-                  be recorded as a part payment.
+                  Short by {formatMoney(-changeDue, currency)} — this will be
+                  recorded as a part payment.
                 </p>
               )}
             </>
@@ -628,7 +716,11 @@ export function PosPage() {
               // the server's refusal is the one that counts, but a button that
               // can only fail is worse than a disabled one — it invites the
               // cashier to keep pressing it in front of a customer.
-              unratedForGst.length > 0
+              unratedForGst.length > 0 ||
+              // Don't take cash for an amount nobody has confirmed (BUG-11).
+              // An on-account sale is exempt: no money changes hands, so the
+              // exact figure can wait for the invoice.
+              (!onAccount && amountDue === null)
             }
             className="w-full"
           >
@@ -638,7 +730,9 @@ export function PosPage() {
                 ? "Set GST rates first"
                 : onAccount
                   ? "Complete (on account)"
-                  : `Take ${formatMoney(estimate, currency)}`}
+                  : amountDue !== null
+                    ? `Take ${formatMoney(amountDue, currency)}`
+                    : "Take payment"}
           </Button>
 
           {basket.length > 0 && (

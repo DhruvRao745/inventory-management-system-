@@ -5,27 +5,53 @@
 import { useEffect, useState } from "react";
 import { Link } from "react-router-dom";
 import { api, ApiError } from "../lib/api";
-import { type InvoiceRow, type InvoiceStatus, invNumber } from "../lib/types";
+import {
+  type InvoiceRow,
+  type InvoiceStatus,
+  type PaymentStatus,
+  invNumber,
+  invoiceBadge,
+} from "../lib/types";
 import { formatMoney } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { Select, ErrorAlert, cardClass, SectionTitle } from "../components/ui";
 
 type ListResponse = { items: InvoiceRow[]; total: number };
 
-export const INVOICE_STATUS_COLORS: Record<InvoiceStatus, string> = {
+/**
+ * Colours cover both the document states and the payment ones, because the
+ * pill now shows whichever actually applies (BUG-13).
+ */
+export const INVOICE_STATUS_COLORS: Record<string, string> = {
   DRAFT: "#9a9ba3",
   ISSUED: "#3b82f6",
   PAID: "#10b981",
   CANCELLED: "#ef4444",
+  UNPAID: "#f59e0b",
+  PARTIAL: "#f59e0b",
+  OVERPAID: "#a855f7",
 };
 
-export function InvoiceStatusPill({ status }: { status: InvoiceStatus }) {
+/**
+ * `status` is the document's workflow state; `paymentStatus` is what the
+ * payment rows say. Pass both and the pill shows the one that applies — a
+ * draft is a draft, but an issued invoice is described by its money, not by a
+ * flag that can sit at PAID with nothing ever received against it.
+ */
+export function InvoiceStatusPill({
+  status,
+  paymentStatus,
+}: {
+  status: InvoiceStatus;
+  paymentStatus?: PaymentStatus;
+}) {
+  const label = invoiceBadge(status, paymentStatus);
   return (
     <span
       className="rounded-[4px] border-2 border-[var(--line)] px-1.5 py-0.5 text-[10px] font-black tracking-wide text-white"
-      style={{ background: INVOICE_STATUS_COLORS[status] }}
+      style={{ background: INVOICE_STATUS_COLORS[label] ?? "#9a9ba3" }}
     >
-      {status}
+      {label}
     </span>
   );
 }
@@ -141,7 +167,10 @@ export function InvoicesPage() {
                     </Link>
                   </td>
                   <td className="px-4 py-3">
-                    <InvoiceStatusPill status={inv.status} />
+                    <InvoiceStatusPill
+                      status={inv.status}
+                      paymentStatus={inv.paymentStatus}
+                    />
                   </td>
                   <td className="px-4 py-3 text-right text-sm font-semibold text-[var(--muted)]">
                     {inv.itemCount.toLocaleString()}

@@ -65,4 +65,25 @@ export const posSaleSchema = z.object({
   notes: z.string().trim().max(500).optional(),
 });
 
+/**
+ * A price check, not a sale (BUG-11).
+ *
+ * The till needs the tax-inclusive total BEFORE it takes money — the cashier
+ * says the figure out loud and counts the change against it. The screen can't
+ * work that out for itself: computing GST in the browser would be a second tax
+ * engine, and `client/src/lib/gst.ts` says in as many words why there must not
+ * be one.
+ *
+ * So the till asks the server the same question the invoice will answer, using
+ * the same engine, and writes nothing. Same fields as a sale minus the money —
+ * anything about payment is irrelevant to what the goods cost.
+ */
+export const posQuoteSchema = posSaleSchema
+  .omit({ payment: true, notes: true })
+  .extend({
+    // A quote can be asked for an empty basket; the answer is simply zero.
+    lines: z.array(posLineSchema),
+  });
+
 export type PosSaleInput = z.infer<typeof posSaleSchema>;
+export type PosQuoteInput = z.infer<typeof posQuoteSchema>;

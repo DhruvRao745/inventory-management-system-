@@ -1,9 +1,14 @@
 /**
  * Point of sale (P3-4).
  *
- *   POST /api/pos/sale → ring up a counter sale
+ *   POST /api/pos/sale  → ring up a counter sale
+ *   POST /api/pos/quote → what will this basket cost, including tax?
  *
- * ONE ROUTE. That is the whole surface.
+ * TWO ROUTES, and the second one earns its place rather than widening the
+ * surface for convenience. A till has to say the amount out loud and count
+ * change against it BEFORE money changes hands, and only the server knows what
+ * tax applies. The alternative was a tax calculation in the browser, which is
+ * the second engine this codebase refuses to have. `quote` writes nothing.
  *
  * A till also needs to find products by barcode, list locations, and print an
  * invoice — and every one of those already exists (`GET /products/lookup`,
@@ -17,7 +22,7 @@
  * a queue never drained.
  */
 import { Router } from "express";
-import { posSaleSchema } from "./pos.schemas.js";
+import { posSaleSchema, posQuoteSchema } from "./pos.schemas.js";
 import * as service from "./pos.service.js";
 import { asyncHandler } from "../../middleware/error.js";
 import {
@@ -46,5 +51,18 @@ posRouter.post(
       input
     );
     res.status(201).json(result);
+  })
+);
+
+/**
+ * A price check. Same permissions as a sale, because it is the same act one
+ * moment earlier — and it changes nothing, so there is nothing to guard.
+ */
+posRouter.post(
+  "/quote",
+  requireRole("ADMIN", "MANAGER", "STAFF"),
+  asyncHandler(async (req: AuthRequest, res) => {
+    const input = posQuoteSchema.parse(req.body);
+    res.json(await service.posQuote(req.user!.companyId, input));
   })
 );

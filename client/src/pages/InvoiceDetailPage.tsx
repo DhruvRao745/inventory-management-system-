@@ -15,7 +15,7 @@ import type {
   PaymentMethod,
 } from "../lib/types";
 import { PAYMENT_METHOD_LABELS } from "../lib/types";
-import { invNumber } from "../lib/types";
+import { invNumber, invoiceBadge } from "../lib/types";
 import { formatMoney, qtyNum, formatQty } from "../lib/format";
 import { useAuth } from "../context/AuthContext";
 import { GST_STATES, stateLabel } from "../lib/gst";
@@ -402,12 +402,17 @@ export function InvoiceDetailPage() {
       );
 
     const issued = new Date(inv.issuedAt ?? inv.createdAt);
+    // The printed copy carries the same badge the screen does (BUG-13): what
+    // the payments say, not a flag that can sit at PAID with nothing received.
+    const printedStatus = invoiceBadge(inv.status, inv.paymentStatus);
     const statusColor =
-      inv.status === "PAID"
+      printedStatus === "PAID"
         ? "#059669"
-        : inv.status === "CANCELLED"
+        : printedStatus === "CANCELLED"
           ? "#dc2626"
-          : "#2d8cf0";
+          : printedStatus === "UNPAID" || printedStatus === "PARTIAL"
+            ? "#d97706"
+            : "#2d8cf0";
 
     const ref = invNumber(inv.number);
     const cur = currency ?? "INR";
@@ -605,7 +610,7 @@ export function InvoiceDetailPage() {
               ${kv("Invoice No.", ref)}
               ${kv("Invoice Date", issued.toLocaleDateString())}
               ${kv("Location", inv.location.name)}
-              ${kv("Status", inv.status)}
+              ${kv("Status", printedStatus)}
             </table>
           </div>
         </div>
@@ -703,7 +708,12 @@ export function InvoiceDetailPage() {
           <SectionTitle>
             {isNew ? "New invoice" : invNumber(inv!.number)}
           </SectionTitle>
-          {inv && <InvoiceStatusPill status={inv.status} />}
+          {inv && (
+            <InvoiceStatusPill
+              status={inv.status}
+              paymentStatus={inv.paymentStatus}
+            />
+          )}
           {/* Which GST treatment applied, stated plainly. The tax lines below
               imply it, but "why does this say IGST?" is a question worth
               answering without arithmetic. */}
